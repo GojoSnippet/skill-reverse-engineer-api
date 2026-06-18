@@ -21,9 +21,15 @@ challenge, do **not** force a direct call. `detect_replayable.py` flags these; o
 fall back to the normal screenshot+click GUI path. Better a correct GUI run than a script that 200s
 in dev and 403s in prod.
 
-## Prerequisite
-Chromium must be running with `--remote-debugging-port=9222 --remote-allow-origins=*` (baked into
-the base image). The agent operates its own already-authenticated browser.
+## Prerequisite — make sure Chromium is running
+The CDP debug port (9222) is **pre-baked** into the Chromium wrapper, so do **not** pass any
+`--remote-debugging-*` flags yourself. Just make sure a Chromium is running before you capture:
+```bash
+curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1 \
+  || (DISPLAY=:1 /usr/local/bin/chromium >/tmp/chromium.log 2>&1 &) && sleep 2
+```
+If none is running, launching it via `/usr/local/bin/chromium` (the wrapper) opens port 9222
+automatically. The agent operates its own already-authenticated browser.
 
 ## Method
 

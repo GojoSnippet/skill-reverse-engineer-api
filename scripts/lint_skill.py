@@ -208,8 +208,9 @@ def _lint_step(steps_dir: str, step: str, spec: dict) -> list[V]:
     used_vars = set(re.findall(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}", step_md))
     for v in sorted(used_vars - declared_inputs):
         out.append(V("inputs-declared-and-referenced", f"{step}.md", f"uses {{{{{v}}}}} but it is not a required_step_input"))
-    if is_write and "allow_mutation" not in declared_inputs:
-        out.append(V("inputs-declared-and-referenced", "SKILL.md", f"WRITE step {step} should declare an allow_mutation input"))
+    # NOTE: allow_mutation is a header approval record + the hardcoded --allow-mutation flag, NOT a runtime
+    # input — the mechanical insert edits only the step file, never SKILL.md. The write-gate stays enforced
+    # by the bare flag (above) + a recorded approver in the header.
 
     return out
 

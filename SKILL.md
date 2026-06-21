@@ -49,15 +49,19 @@ python scripts/detect_replayable.py --run .o11y/run
 ```
 Flags a signature / HMAC / nonce / CAPTCHA / anti-bot → **keep UI** (step 7, case 5).
 
-### 4. Detect the auth case (from the candidate)
-| `observedAuthHeaders` | request origin vs page | → case |
-|---|---|---|
-| none / cookie only | same | **1 — cookie:** in-page `fetch`, `credentials:"include"`, no auth header |
-| bearer/token, value IS in a readable cookie/localStorage | any | **2 — readable token:** re-source it live in the JS |
-| bearer/token, value NOT readable | cross-origin | **3 — keep UI** (or case 4 if an official API + token is configured) |
+### 4. Detect the auth case — DETERMINISTICALLY, do not hand-hunt cookies
+Build the request JSON from the candidate and let `probe_auth.py` find the working auth in one bounded pass:
+```bash
+printf '%s' '{"method":"<METHOD>","url":"<URL>","headers":{<non-auth customHeaders + content-type>},"body":<request body as a JSON string, or null>}' > /tmp/req.json
+python scripts/probe_auth.py --match <origin> --request /tmp/req.json --expect-status 200
+```
+It returns `{working, case, recipe}`:
+- **case 1** — `credentials:"include"`, no auth header (cookie session).
+- **case 2** — `recipe` names the readable cookie/localStorage value to send as `Bearer`.
+- **case 3** (`working:false`) — no readable auth reproduced it → **keep UI** (step 7).
 
-Case 4 — if the app has an official API and a token is configured for it, prefer a `curl` official-API
-step (most robust; no browser). Case 5 — signed/anti-bot → UI. (See `references/hard-cases.md`.)
+**This is the ONLY auth probing.** Do not grep cookies, read `__NEXT_DATA__`, or try fetches by hand.
+(Case 4 — an official API + a configured token → prefer a `curl` step; case 5 — signed/anti-bot → UI. See `references/hard-cases.md`.)
 
 ### 5. Build the faithful replay (cases 1 & 2) → write the `run-in-page` COMMAND (the invocation only, no prose) to `/tmp/command.sh`
 Transcribe the candidate — do not hand-write:
@@ -70,13 +74,10 @@ Transcribe the candidate — do not hand-write:
   captured response has** (e.g. `pdfUrl`) plus status. **Do not invent fields** (the `didSucceed` mistake).
 - for a binary, return `download:{url}` so the helper streams it to `--out`.
 
-### 6. Validate — this is the WHOLE probe budget
-Run the `run-in-page` once.
-- **exit 0 + a correct, typed `--out` file** → confirmed; `validated: yes (ran live, <evidence>)`.
-- **exit ≠ 0 / 401 / UNAUTHENTICATED** → **ONE** escalation: if you were on case 1, try case 2 once
-  (re-source the token from the obvious readable cookie/localStorage, re-run once). If that also fails →
-  **keep UI (case 3).**
-- **STOP after this.** No further probing. No cookie-DB / keyring / `__NEXT_DATA__` hunting.
+### 6. Validate — run it once
+`probe_auth.py` already found the auth, so just run the `run-in-page` command once to confirm end-to-end:
+- **exit 0 + a correct, typed `--out` file** → `validated: yes (ran live, <evidence>)`.
+- **any other exit** → keep UI (case 3). **STOP** — no manual probing, ever.
 
 ### 7. Write the outcome — mechanically, never by hand-editing the file
 - **API-able (case 1/2 validated):**
@@ -119,6 +120,7 @@ Stop — the human reviews the one-file diff and commits. **Never `git commit`/`
 - `capture_cdp.py` — clean one-shot capture (start → one action → stop).
 - `analyze.py` (+ `_engine/`, Browserbase MIT, analysis-only) — surface the candidate request.
 - `detect_replayable.py` — signed/anti-bot bail check.
+- `probe_auth.py` — deterministic bounded auth search (cases 1/2/3) — replaces manual cookie hunting.
 - `run_in_page.py` — `run-in-page`, the on-PATH in-page caller (cases 1 & 2).
 - `teach_insert.py` — the mechanical single-file surgical insert (the write path).
 - `lint_skill.py` — OPTIONAL CI consistency check; NOT part of this procedure.

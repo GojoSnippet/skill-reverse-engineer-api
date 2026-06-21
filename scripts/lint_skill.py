@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# lint_skill — enforce the reverse-engineer-api SINGLE-FILE artifact pattern on a client workflow skill.
-# Run as a REQUIRED CI check in every client skill repo. Exit 0 = clean, 1 = violations.
+# lint_skill — OPTIONAL CI consistency check for the reverse-engineer-api single-file pattern.
+# NOT part of the teaching procedure (the method enforces shape mechanically via teach_insert.py). Run it
+# in CI if you want a second guard. Exit 0 = clean, 1 = violations.
 #
 #   python lint_skill.py <skill-dir>        # e.g. .../wave
 #

@@ -1,107 +1,126 @@
 ---
 name: reverse-engineer-api
 description: >-
-  Teaching-mode helper: convert one existing UI workflow step into a faster API-backed version. It edits
-  the target step's single file IN PLACE — adding an `## API` section (one run-in-page call) above the
-  original steps kept as `## UI`, ending with a `## Report` block. One file per step, no sidecars. Use
-  when a human in teaching mode asks to make a step use the API instead of clicking, reverse engineer the
-  API behind a step, "apify" a step, or make a workflow cheaper/faster. Trigger words: reverse engineer
-  api, use the api, apify, make this cheaper, convert this step to api, skip the UI.
+  Teaching-mode helper: convert one demonstrated UI workflow step into a faster API-backed version WHEN
+  the request can be faithfully replayed. It captures the real request, decides if it's reproducible, and
+  EITHER writes an `## API attempt` into the step (preserving the UI verbatim as the fallback) OR keeps
+  the UI with a short written reason. Disciplined: edits only the one target step file. Trigger words:
+  reverse engineer api, use the api, apify, make this cheaper, convert this step to api, skip the UI.
 ---
 
 # Reverse-Engineer-API (teaching-mode helper)
 
-A **universal helper**, like `skill-creator`. In **teaching mode** it converts one step of a *target
-workflow skill* into an API-backed step. Normal sessions just run the step; they never use this skill and
-never edit skills.
+A universal helper like `skill-creator`. In teaching mode it converts ONE step of a target workflow skill
+into an API-backed step **when the captured request can be faithfully replayed**, and otherwise **keeps
+the UI** and says why. Normal sessions never use this skill.
 
-- **Teacher/tool:** this skill. **Student/output:** the target workflow skill (e.g. `wave/`).
-- **One file per step.** You do not create `.ui.md` or `.capture.json` sidecars. You edit the one
-  `steps/<STEP>.md` in place: a one-line provenance header → `## API` (a single on-PATH `run-in-page`
-  call) → `## UI` (the original prose, unchanged) → `## Report`. The step tries the API and falls back to
-  the UI on any failure. There is **no `-api.md` sibling** and **nothing to route**.
+**The two rules that make this trustworthy:**
+1. **Faithful replay, not guessing.** The API call is built by TRANSCRIBING the captured request (method,
+   URL, headers, body); the success check comes from the captured RESPONSE. Never invent fields.
+2. **Converge, don't grind.** Follow the decision tree with its fixed probe budget. Decide, write the
+   outcome, stop. **No open-ended auth hunting** (the failure mode that wasted 6 minutes last time).
 
-## Inputs (from the human's instruction)
-- `TARGET_SKILL` — path to the **editable** workflow skill, e.g. `/agent/skills/editable/<repo>/wave`.
-- `STEP` — the step to convert; its current UI prose is `steps/<STEP>.md`.
+## Inputs (from the human)
+- `TARGET_SKILL` — path to the editable skill, e.g. `/agent/skills/editable/<repo>/<skill>`.
+- `STEP` — the step to convert; `steps/<STEP>.md` is its mission-style UI baseline.
 
-## When NOT to do it — keep the UI step
-- `detect_replayable.py` flags a **signature/HMAC/nonce**, **CAPTCHA/Turnstile**, or active **anti-bot**
-  → keep the UI step (a correct UI run beats a script that 200s in dev and 403s in prod).
-- **Policy:** a **WRITE** (mutation / POST-PUT-PATCH-DELETE) with **no consequence-free way to validate**
-  stays **UI-only** — do not API-ify it. Reads, and writes you can safely re-run (e.g. a PDF render), are eligible.
+## Prerequisites
+`command -v run-in-page` and `curl -s http://127.0.0.1:9222/json/version` must both succeed.
 
-## Safety (always)
-- **Never `git commit`/`git push` yourself.** You edit the file in the editable target skill; the
-  **human reviews the diff and commits**. Outside teaching mode, never modify skills.
-- **No secrets/identity in the file.** `run-in-page` re-sources auth live each run (default
-  `credentials:"include"`, no header); never write a token/cookie/account-id. `lint_skill.py` enforces this.
-- On the live site: no delete, no modify, no data leak.
+## Procedure — do exactly this, in order
 
-## Prerequisite — `run-in-page` on PATH + a CDP-enabled Chromium
-`run-in-page`, `websocket-client`, and a Chromium with a loopback CDP debug port are baked into the
-runtime. Confirm: `command -v run-in-page` and `curl -s http://127.0.0.1:9222/json/version`.
+### 1. Capture the demo (ONE action)
+```bash
+python scripts/capture_cdp.py --out .o11y/run --start    # begin capture (background)
+#   … perform EXACTLY the one action (e.g. download the invoice) in the browser, ONCE …
+python scripts/capture_cdp.py --out .o11y/run --stop     # end capture
+```
 
-## Method
+### 2. Find the request
+```bash
+python scripts/analyze.py --run .o11y/run --match <url-substr-of-the-action>
+```
+Pick the ONE candidate matching the action. Note its `method`, `url`, `operationName`, `customHeaders`,
+`requestExample`, `observedAuthHeaders`, `responseExampleKeys`.
 
-1. **Read the current step.** `steps/<STEP>.md` is the UI baseline in mission style (Mission / Inputs /
-   Instructions / Return value / Important). Its **Instructions** block is the proven UI path — it becomes
-   the `## UI instructions` fallback **verbatim**. Don't rewrite or lose it.
-2. **Demonstrate + action-bounded capture.** Start capture, perform **exactly the one** action, stop:
-   ```bash
-   python scripts/capture_cdp.py --port 9222 --out .o11y/run1   # one action, then stop
-   ```
-3. **Analyze.** `python scripts/analyze.py --run .o11y/run1 [--match <url-substr>]` → pick the candidate
-   matching the action (note `method`, `url`/origin, params, `requestExample`, auth headers).
-4. **Classify + bail check.** `python scripts/detect_replayable.py --run .o11y/run1` → signed/anti-bot ⇒
-   keep UI. Note **read vs write** (GraphQL `mutation` / REST verb). A WRITE with no safe validation ⇒ **UI-only, stop.**
-5. **Edit `steps/<STEP>.md` in place** to the single-file pattern:
-   The edit is a **surgical insert, not a rewrite.** Keep **Mission** and **Inputs** at the top and
-   **Return value** / **Important** at the bottom exactly as they were. Only:
-   - **Add a header comment (one line) at the very top:** `<!-- reverse-engineer-api · taught <date> ·
-     class READ|WRITE · approved: <human> (<why-safe, writes only>) · validated: <state> · regenerate -->`
-   - **Insert `## API attempt` ABOVE the original instructions:** (a) build `--vars-json` from the Inputs;
-     (b) **one** `run-in-page --contract 1 [--allow-mutation for writes] --match <origin> --out <path>
-     --vars-json '…' --js '<in-page fetch with {{vars}} returning {ok,…,download?:{url}}>'`; (c) **branch on
-     the exit code only** — `0` ⇒ set Return value `method: api` + the path and stop; any other ⇒ do the UI
-     instructions below, and tell the model **not** to investigate / read cookies / grep.
-   - **Rename the original `Instructions:` heading to `## UI instructions`** — the numbered steps stay
-     **byte-for-byte** (the proven fallback). Don't touch them.
-   - **Add `method: "api" | "ui"`** to the **Return value** block so each run states which path ran.
-   - **Auth ladder:** default `credentials:"include"` with **no** auth header; only climb to a
-     live-re-sourced token if it 401/403s; never store a value. If auth needs an httpOnly token JS can't
-     read and the cookie alone 401s ⇒ keep UI.
-   - **Strong success predicate** in `ok` (not bare 2xx): **status + a positive shape signal appropriate
-     to the response** — a content-type/magic-byte check for file responses, or an op-success field like
-     `didSucceed` for GraphQL (it returns 200 even on errors); `run-in-page` also verifies `--out` is a
-     non-empty, type-correct file (it rejects an HTML error page).
-   - **Chains:** inline a **self-contained** chain (incl. a bounded poll) into the one JS; **bail to UI**
-     if it needs an uncaptured value, unbounded polling, or cross-step state.
-   - Add any new `required_step_inputs` (the vars + `allow_mutation` for writes) to the target `SKILL.md`.
-6. **Validate by running it once** against a warm (logged-in) browser. Reads run freely; an eligible
-   write runs once against a safe target. Set `validated` in the header honestly
-   (`yes (ran live, <evidence>)` or `no — <why>`).
-7. **Lint.** `python scripts/lint_skill.py "$TARGET_SKILL"` → must be **CLEAN**.
-8. **Stop — hand to the human.** Emit the structured teaching report and let the human review + commit:
-   ```
-   ━━━━ TAUGHT ━━━━
-   STEP:      <skill>/<STEP>
-   RESULT:    api-added   (or: kept-ui — <reason>)
-   CLASS:     read | write
-   VALIDATED: yes (<evidence>)  | no (<why>)
-   FILE:      steps/<STEP>.md   (one file; original steps preserved as ## UI)
-   ```
+### 3. Bail check
+```bash
+python scripts/detect_replayable.py --run .o11y/run
+```
+Flags a signature / HMAC / nonce / CAPTCHA / anti-bot → **keep UI** (step 7, case 5).
 
-See `references/hard-cases.md` for the worked Wave example and the full read/write, auth, and chain rules.
+### 4. Detect the auth case (from the candidate)
+| `observedAuthHeaders` | request origin vs page | → case |
+|---|---|---|
+| none / cookie only | same | **1 — cookie:** in-page `fetch`, `credentials:"include"`, no auth header |
+| bearer/token, value IS in a readable cookie/localStorage | any | **2 — readable token:** re-source it live in the JS |
+| bearer/token, value NOT readable | cross-origin | **3 — keep UI** (or case 4 if an official API + token is configured) |
+
+Case 4 — if the app has an official API and a token is configured for it, prefer a `curl` official-API
+step (most robust; no browser). Case 5 — signed/anti-bot → UI. (See `references/hard-cases.md`.)
+
+### 5. Build the faithful replay (cases 1 & 2) → write the `## API attempt` body to `/tmp/api.md`
+Transcribe the candidate — do not hand-write:
+- one `run-in-page --contract 1 [--allow-mutation for a write] --match <origin> --out <path>
+  --vars-json '<inputs JSON>' --js '<fetch>'`
+- the `<fetch>` copies the candidate's `method`, `url`, `requestContentType`, **every `customHeaders` key**,
+  and the `requestExample` body — **parameterise only the step's inputs** as `{{var}}`. For case 2, set
+  the auth header from the readable token (e.g. a cookie value); **never a literal token**.
+- the returned `ok` predicate is derived from `responseExampleKeys` — require the **real success fields the
+  captured response has** (e.g. `pdfUrl`) plus status. **Do not invent fields** (the `didSucceed` mistake).
+- for a binary, return `download:{url}` so the helper streams it to `--out`.
+
+### 6. Validate — this is the WHOLE probe budget
+Run the `run-in-page` once.
+- **exit 0 + a correct, typed `--out` file** → confirmed; `validated: yes (ran live, <evidence>)`.
+- **exit ≠ 0 / 401 / UNAUTHENTICATED** → **ONE** escalation: if you were on case 1, try case 2 once
+  (re-source the token from the obvious readable cookie/localStorage, re-run once). If that also fails →
+  **keep UI (case 3).**
+- **STOP after this.** No further probing. No cookie-DB / keyring / `__NEXT_DATA__` hunting.
+
+### 7. Write the outcome — mechanically, never by hand-editing the file
+- **API-able (case 1/2 validated):**
+  ```bash
+  python scripts/teach_insert.py --step "$TARGET_SKILL/steps/<STEP>.md" \
+    --header "reverse-engineer-api · taught <date> · class READ|WRITE · approved: <human> (<why-safe>) · validated: <state>" \
+    --api /tmp/api.md
+  ```
+  (This edits ONLY the step file, inserts `## API attempt` above the originals, and preserves them
+  verbatim as `## UI instructions`. Do not edit the file by hand — that churns the UI and other files.)
+- **Keep UI (case 3/5):** do NOT touch the step file; write the structured reason in the report.
+
+### 8. Verify discipline + report
+```bash
+git -C "$TARGET_SKILL" diff --name-only
+```
+MUST be **only** `steps/<STEP>.md` (or empty, if kept-UI). Anything else → `git -C "$TARGET_SKILL" checkout -- <that-file>`.
+Then emit:
+```
+━━━━ TAUGHT ━━━━
+STEP:      <skill>/<STEP>
+RESULT:    api-added (case 1|2)   |   kept-ui (case 3|5)
+VALIDATED: yes (<evidence>)       |   n/a
+WHY (kept-ui only):
+  case:    <3 cross-origin bearer | 5 signed/anti-bot>
+  tried:   <one line — what was attempted>
+  blocked: <one line — why it can't be replayed in-page>
+FILES:     steps/<STEP>.md   (only)
+```
+Stop — the human reviews the one-file diff and commits. **Never `git commit`/`push` yourself.**
+
+## Safety
+- Edit only the target step file (the `git diff --name-only` check enforces it).
+- No secrets in the artifact: `run-in-page` re-sources auth live; never write a token/cookie/account-id.
+  (Login email/password may stay inline in the UI block, as in the Alphaskill steps.)
+- On the live site: no delete/modify/leak beyond the demonstrated read or consequence-free write.
 
 ## Bundled scripts
-- `scripts/capture_cdp.py` — CDP capture of the demonstrated action (teaching-time).
-- `scripts/_engine/` — Browserbase `browser-to-api` engine (MIT, vendored, **unmodified**; analysis only, never `emit`).
-- `scripts/analyze.py` — surface candidate endpoints (teaching-time).
-- `scripts/detect_replayable.py` — signed/anti-bot bail + read/write note (teaching-time).
-- `scripts/run_in_page.py` — source for **`run-in-page`**, the generic on-PATH runtime helper (body-derived
-  read/write gate, success-predicate→exit, correct-tab, **waits for the browser/tab**, binary-to-file).
-- `scripts/lint_skill.py` — the CI gate that enforces this single-file pattern in every client repo.
+- `capture_cdp.py` — clean one-shot capture (start → one action → stop).
+- `analyze.py` (+ `_engine/`, Browserbase MIT, analysis-only) — surface the candidate request.
+- `detect_replayable.py` — signed/anti-bot bail check.
+- `run_in_page.py` — `run-in-page`, the on-PATH in-page caller (cases 1 & 2).
+- `teach_insert.py` — the mechanical single-file surgical insert (the write path).
+- `lint_skill.py` — OPTIONAL CI consistency check; NOT part of this procedure.
 
 ## References
-- `references/hard-cases.md` — signed bodies, anti-bot, GraphQL, chains, auth ladder, and when to bail.
+- `references/hard-cases.md` — the 5-case table, the auth ladder, chains, and when to bail.

@@ -3,6 +3,21 @@
 Default: **API attempt with UI fallback**. When in doubt, keep the UI step. A correct UI run beats an
 API step that 200s in dev and 403s in prod.
 
+## The five cases — how a web app exposes its API, and what to do
+
+Detect the case from the captured request's origin + `observedAuthHeaders`, then pick the mechanism:
+
+| # | Case | Tell | Mechanism |
+|---|------|------|-----------|
+| 1 | Same-origin + cookie session (common) | request origin == page origin; no bearer header | in-page `fetch`, `credentials:"include"`, no auth header |
+| 2 | JS-readable token | a bearer/token header whose value sits in a readable cookie / localStorage / JS global | in-page `fetch`, re-source the token live (auth rung 2/3) — e.g. Wave's `waveapps` cookie value sent as the Bearer |
+| 3 | In-memory / httpOnly bearer | a bearer whose value is in **no** readable store | keep UI (or case 4) — can't reproduce in-page |
+| 4 | Official public API + provisioned token | the app documents a REST/GraphQL API; a long-lived token is configured | call it with `curl` + the token (no browser, no CORS) — most robust |
+| 5 | Signed / HMAC / nonce / CAPTCHA / anti-bot | `detect_replayable.py` flags it | keep UI |
+
+Cases 1, 2, 4 → write an `## API attempt`. Cases 3, 5 → keep UI with a one-line structured reason. The
+auth ladder below is how you climb case 1 → 2; the probe budget is **one** escalation, then stop.
+
 ## Read vs write (the gate `run-in-page` enforces)
 `run-in-page` derives **read|write** from the fetch body itself — GraphQL `mutation` keyword, or REST
 `POST/PUT/PATCH/DELETE` — and **refuses a write (or anything it can't classify) unless `--allow-mutation`

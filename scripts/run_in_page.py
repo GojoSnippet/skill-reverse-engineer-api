@@ -19,7 +19,10 @@
 #   0 success | 1 ran but ok=false / bad output | 2 JS threw / tab not found
 #   3 REFUSED: write fetch without --allow-mutation | 4 contract mismatch | 5 usage error
 #
-# Prereq: a CDP-enabled Chromium on a loopback debug port + `pip install websocket-client`.
+# Prereq: a CDP-enabled Chromium on a loopback debug port + `pip install websocket-client`. The browser
+# must already be OPEN and on the target origin (the step opens the app first). pick_target waits up to
+# --cdp-wait seconds for the browser/tab to be ready, so a just-launched/just-navigated browser is not a
+# hard failure (this is what made the first live run fail: the step ran before the browser existed).
 
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 
 CONTRACT_VERSION = 1
@@ -55,32 +59,34 @@ def substitute_vars(js: str, vars_obj: dict) -> str:
     return out
 
 
-_METHOD_RE = re.compile(r"""method\s*:\s*['"]([A-Za-z]+)['"]""")
-_GQL_MUTATION_RE = re.compile(r"\bmutation\b\s+[A-Za-z{]")  # `mutation Name(` / `mutation {`
-_GQL_QUERY_RE = re.compile(r"\bquery\b\s+[A-Za-z{]")
+_METHOD_LITERAL_RE = re.compile(r"""method\s*:\s*['"]([A-Za-z]+)['"]""")
+_METHOD_KEY_RE = re.compile(r"\bmethod\s*:")
+_GQL_MUTATION_RE = re.compile(r"\bmutation\b\s*[A-Za-z({]")  # `mutation Name` / `mutation{` / `mutation(`
+_GQL_QUERY_RE = re.compile(r"\bquery\b\s*[A-Za-z({]")
 _PERSISTED_RE = re.compile(r"persistedQuery|sha256Hash", re.I)
 
 
 def classify(js: str) -> str:
-    """Derive read|write|unknown from the fetch in ``js``. Fail SAFE: ambiguous => 'unknown' (treated
-    as write by the gate). Never trust a caller-supplied label."""
-    methods = {m.upper() for m in _METHOD_RE.findall(js)}
-    if methods & {"DELETE", "PUT", "PATCH"}:
+    """Derive read|write|unknown from the fetch in ``js``. FAIL SAFE: anything not provably a READ =>
+    'unknown' (which the gate treats as a write). Never trust a caller-supplied label, and never let an
+    unquoted/variable method or a minified ``mutation{`` slip through as a read."""
+    # 1. a GraphQL mutation anywhere => write (catches `mutation Name`, `mutation{`, `mutation(`)
+    if _GQL_MUTATION_RE.search(js):
         return "write"
-    if methods & {"GET", "HEAD"} and "POST" not in methods:
-        return "read"
-    if "POST" in methods or not methods:
-        # POST (or method omitted, default GET but bodies suggest POST-for-graphql): inspect the body.
-        if _GQL_MUTATION_RE.search(js):
-            return "write"
-        if _GQL_QUERY_RE.search(js) and not _GQL_MUTATION_RE.search(js):
-            return "read"
-        if _PERSISTED_RE.search(js):
-            return "unknown"  # persisted query with no inline op text -> can't tell -> approval
-        if "POST" in methods:
-            return "unknown"  # a plain POST we can't classify -> require approval
-        return "read"  # no method, no POST body markers -> a GET
-    return "unknown"
+    literal_methods = {m.upper() for m in _METHOD_LITERAL_RE.findall(js)}
+    # 2. an explicit destructive verb literal => write
+    if literal_methods & {"DELETE", "PUT", "PATCH"}:
+        return "write"
+    # 3. a method: key whose value is NOT a quoted literal (e.g. a variable) => can't prove read => unknown
+    if _METHOD_KEY_RE.search(js) and not _METHOD_LITERAL_RE.search(js):
+        return "unknown"
+    # 4. POST: a read only if it's a GraphQL query (mutations already excluded above); else require approval
+    if "POST" in literal_methods:
+        return "read" if _GQL_QUERY_RE.search(js) else "unknown"
+    if _PERSISTED_RE.search(js):
+        return "unknown"  # persisted op with no inline text -> can't tell -> approval
+    # 5. a GET/HEAD literal, or no method key at all (default GET), with no write markers => read
+    return "read"
 
 
 def evaluate_outcome(result: object, out_path: str | None, out_exists_nonempty: bool) -> tuple[int, dict]:
@@ -99,53 +105,100 @@ def evaluate_outcome(result: object, out_path: str | None, out_exists_nonempty: 
 
 # ---- CDP + I/O (needs a real browser; covered by the integration-test gate) ----
 
-def pick_target(port: int, match: str | None) -> dict:
-    data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
-    pages = [t for t in data if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
-    if match:
-        pages = [t for t in pages if match in (t.get("url") or "")]
-        if not pages:
-            raise LookupError(f"no open tab whose URL contains {match!r} — refusing to guess the wrong tab")
-        if len(pages) > 1:
-            raise LookupError(f"{len(pages)} tabs match {match!r} — ambiguous; narrow --match")
-        return pages[0]
-    http_pages = [t for t in pages if (t.get("url") or "").startswith("http")]
-    if len(http_pages) == 1:
-        return http_pages[0]
-    raise LookupError("multiple/zero http tabs open — pass --match <url-substr> to target the right one")
+def _origin(url: str) -> str:
+    m = re.match(r"[a-z][a-z0-9+.\-]*://[^/]+", url or "")
+    return m.group(0) if m else (url or "")
+
+
+def pick_target(port: int, match: str | None, wait_s: float = 15.0) -> dict:
+    """Find the CDP page target to evaluate in, tolerating a browser that is still booting or a tab still
+    navigating. Retries the debug endpoint until ``wait_s`` elapses; fails LOUD on an ambiguous match
+    (terminal, no retry) or after the deadline. The wait is what stops a just-launched browser from being
+    an instant ``connection refused`` (the bug from the first live run)."""
+    deadline = time.monotonic() + max(0.0, wait_s)
+    last = f"no CDP endpoint on :{port}"
+    while True:
+        try:
+            data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
+            pages = [t for t in data if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+            if match:
+                hits = [t for t in pages if match in (t.get("url") or "")]
+                if hits:
+                    origins = {_origin(t.get("url") or "") for t in hits}
+                    if len(origins) == 1:
+                        return hits[0]  # same-origin tabs share cookies — any is safe; pick deterministically
+                    raise LookupError(
+                        f"{len(hits)} tabs match {match!r} across {len(origins)} origins — ambiguous; narrow --match")
+                last = f"no open tab whose URL contains {match!r} yet"
+            else:
+                http_pages = [t for t in pages if (t.get("url") or "").startswith("http")]
+                if len(http_pages) == 1:
+                    return http_pages[0]
+                last = "multiple/zero http tabs open — pass --match <url-substr> to target the right one"
+        except OSError as exc:
+            last = f"CDP endpoint not reachable on :{port} ({exc})"
+        if time.monotonic() >= deadline:
+            raise LookupError(last)
+        time.sleep(0.5)
 
 
 def evaluate_in_page(ws_url: str, js: str, timeout: int) -> dict:
-    from websocket import WebSocketTimeoutException, create_connection
-    ws = create_connection(ws_url, max_size=None)
-    ws.settimeout(timeout + 5)
-    ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
-    ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
-        "expression": js, "awaitPromise": True, "returnByValue": True, "timeout": timeout * 1000}}))
-    while True:
-        try:
+    # websocket-client exceptions are NOT OSError/TimeoutError subclasses — catch them here and re-raise
+    # as standard types main() handles, so a handshake/send/recv failure (the TOCTOU cold-start window)
+    # becomes a clean THREW with a reason line, never an uncaught traceback.
+    from websocket import WebSocketException, WebSocketTimeoutException, create_connection
+    try:
+        ws = create_connection(ws_url, max_size=None)
+        ws.settimeout(timeout + 5)
+        ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
+        ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
+            "expression": js, "awaitPromise": True, "returnByValue": True, "timeout": timeout * 1000}}))
+        while True:
             msg = json.loads(ws.recv())
-        except WebSocketTimeoutException:
-            raise TimeoutError("timed out waiting for the in-page evaluate result")
-        if msg.get("id") == 2:
-            return msg.get("result", {})
+            if msg.get("id") == 2:
+                return msg.get("result", {})
+    except WebSocketTimeoutException as exc:
+        raise TimeoutError("timed out waiting for the in-page evaluate result") from exc
+    except WebSocketException as exc:
+        raise OSError(f"CDP websocket failed: {exc}") from exc
+
+
+_MAGIC = {".pdf": b"%PDF", ".png": b"\x89PNG", ".zip": b"PK\x03\x04", ".gz": b"\x1f\x8b"}
+
+
+def looks_like_expected(out_path: str, data: bytes, content_type: str | None) -> bool:
+    """Reject an HTML login/error page or a body that doesn't match the declared file type — so a
+    cookie-gated download URL that returns an 'access denied' page is a FAILURE, not a false success
+    (urllib carries no browser cookies; download.url MUST be self-authenticating, e.g. pre-signed S3)."""
+    if not data:
+        return False
+    if content_type and "text/html" in content_type.lower():
+        return False
+    if data[:512].lstrip().lower().startswith((b"<!doctype", b"<html")):
+        return False
+    magic = _MAGIC.get(os.path.splitext(out_path)[1].lower())
+    return not (magic and not data.startswith(magic))
 
 
 def write_out(result: dict, out_path: str, timeout: int) -> bool:
     """Write binary output to --out. Prefer a download URL the helper fetches (no base64 through CDP);
-    fall back to small inline dataBase64. Returns True if a non-empty file was written."""
+    fall back to small inline dataBase64. Returns True only if a non-empty, type-correct file was written."""
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     dl = result.get("download") if isinstance(result, dict) else None
     if isinstance(dl, dict) and dl.get("url"):
         with urllib.request.urlopen(dl["url"], timeout=timeout) as r:
+            content_type = r.headers.get("content-type")
             data = r.read()
-        with open(out_path, "wb") as f:
-            f.write(data)
+        if not looks_like_expected(out_path, data, content_type):
+            return False
     elif isinstance(result, dict) and result.get("dataBase64"):
-        with open(out_path, "wb") as f:
-            f.write(base64.b64decode(result["dataBase64"]))
+        data = base64.b64decode(result["dataBase64"])
+        if not looks_like_expected(out_path, data, None):
+            return False
     else:
         return False
+    with open(out_path, "wb") as f:
+        f.write(data)
     return os.path.getsize(out_path) > 0
 
 
@@ -159,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None, help="write binary output here")
     ap.add_argument("--port", type=int, default=9222)
     ap.add_argument("--timeout", type=int, default=30)
+    ap.add_argument("--cdp-wait", type=float, default=15.0,
+                    help="seconds to wait for the browser/tab to become ready before giving up")
     args = ap.parse_args(argv)
 
     if args.contract != CONTRACT_VERSION:
@@ -184,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         return REFUSED_WRITE
 
     try:
-        target = pick_target(args.port, args.match)
+        target = pick_target(args.port, args.match, args.cdp_wait)
         raw = evaluate_in_page(target["webSocketDebuggerUrl"], js, args.timeout)
     except (LookupError, TimeoutError, OSError) as exc:
         print(json.dumps({"ok": False, "reason": str(exc)}))

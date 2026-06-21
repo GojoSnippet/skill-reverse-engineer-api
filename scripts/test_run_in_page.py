@@ -4,6 +4,7 @@
 import io
 import json
 import sys
+import time
 from contextlib import redirect_stdout
 
 import run_in_page as r
@@ -86,11 +87,84 @@ def test_main_unknown_without_allow_mutation_refused():
 def test_main_read_passes_gate_then_tries_browser():
     # a READ should get PAST the gate and fail at the (absent) browser -> THREW, proving the gate let it through
     js = 'fetch(u,{method:"GET"})'
-    assert _run(["--contract", "1", "--port", str(UNUSED_PORT), "--js", js]) == r.THREW
+    assert _run(["--contract", "1", "--port", str(UNUSED_PORT), "--cdp-wait", "0", "--js", js]) == r.THREW
 
 def test_main_write_with_allow_mutation_passes_gate():
     js = 'fetch(u,{method:"POST",body:JSON.stringify({query:"mutation M{ m{ ok } }"})})'
-    assert _run(["--contract", "1", "--allow-mutation", "--port", str(UNUSED_PORT), "--js", js]) == r.THREW
+    assert _run(["--contract", "1", "--allow-mutation", "--port", str(UNUSED_PORT), "--cdp-wait", "0", "--js", js]) == r.THREW
+
+
+# ---- pick_target wait/timeout (race fix) ----
+def test_pick_target_times_out_fast_without_browser():
+    t0 = time.monotonic()
+    try:
+        r.pick_target(UNUSED_PORT, "next.waveapps.com", wait_s=0.0)
+    except LookupError as e:
+        assert "not reachable" in str(e) or "no open tab" in str(e)
+    else:
+        raise AssertionError("expected LookupError when no browser is up")
+    assert time.monotonic() - t0 < 5, "wait_s=0 must fail fast, not block"
+
+def _fake_json(tabs):
+    return lambda *a, **k: io.BytesIO(json.dumps(tabs).encode())
+
+def test_pick_target_same_origin_multi_picks_first():
+    # multiple same-origin tabs share cookies -> deterministic pick (the API path must not evaporate)
+    tabs = [
+        {"type": "page", "webSocketDebuggerUrl": "ws://x/1", "url": "https://next.waveapps.com/123/invoices"},
+        {"type": "page", "webSocketDebuggerUrl": "ws://x/2", "url": "https://next.waveapps.com/123/invoices/9/view"},
+    ]
+    orig = r.urllib.request.urlopen
+    r.urllib.request.urlopen = _fake_json(tabs)
+    try:
+        assert r.pick_target(1, "next.waveapps.com", wait_s=5.0)["webSocketDebuggerUrl"] == "ws://x/1"
+    finally:
+        r.urllib.request.urlopen = orig
+
+def test_pick_target_cross_origin_multi_is_ambiguous():
+    # the substring spans two DIFFERENT origins -> refuse to guess the wrong one
+    tabs = [
+        {"type": "page", "webSocketDebuggerUrl": "ws://x/1", "url": "https://next.waveapps.com/a"},
+        {"type": "page", "webSocketDebuggerUrl": "ws://x/2", "url": "https://app.waveapps.com/b"},
+    ]
+    orig = r.urllib.request.urlopen
+    r.urllib.request.urlopen = _fake_json(tabs)
+    try:
+        r.pick_target(1, "waveapps.com", wait_s=5.0)
+    except LookupError as e:
+        assert "ambiguous" in str(e)
+    else:
+        raise AssertionError("expected cross-origin ambiguous LookupError")
+    finally:
+        r.urllib.request.urlopen = orig
+
+
+# ---- classify fail-safe (write-gate bypasses) ----
+def test_classify_variable_method_is_unknown():
+    assert r.classify('const m="DELETE"; fetch(u,{method:m})') == "unknown"
+
+def test_classify_minified_mutation_is_write():
+    assert r.classify('fetch(u,{method:"POST",body:JSON.stringify({query:"mutation{invoiceDelete(id:1){ok}}"})})') == "write"
+
+def test_classify_anonymous_mutation_is_write():
+    assert r.classify('fetch(u,{body:JSON.stringify({query:"mutation($i:X){ del(input:$i){ ok } }"})})') == "write"
+
+
+# ---- looks_like_expected (no false success on a cookie-gated / HTML download) ----
+def test_looks_like_expected_rejects_html_content_type():
+    assert r.looks_like_expected("/x/invoice.pdf", b"%PDF-1.7 but lying", "text/html; charset=utf-8") is False
+
+def test_looks_like_expected_rejects_html_body():
+    assert r.looks_like_expected("/x/invoice.pdf", b"<!DOCTYPE html><html>access denied</html>", None) is False
+
+def test_looks_like_expected_rejects_wrong_magic():
+    assert r.looks_like_expected("/x/invoice.pdf", b"this is not a pdf at all", None) is False
+
+def test_looks_like_expected_accepts_real_pdf():
+    assert r.looks_like_expected("/x/invoice.pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", "application/pdf") is True
+
+def test_looks_like_expected_rejects_empty():
+    assert r.looks_like_expected("/x/invoice.pdf", b"", "application/pdf") is False
 
 def test_main_missing_js_is_usage():
     assert _run(["--contract", "1", "--js", "   "]) == r.USAGE

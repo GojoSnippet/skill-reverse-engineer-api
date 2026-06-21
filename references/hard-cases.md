@@ -7,11 +7,11 @@ API step that 200s in dev and 403s in prod.
 `run-in-page` derives **read|write** from the fetch body itself — GraphQL `mutation` keyword, or REST
 `POST/PUT/PATCH/DELETE` — and **refuses a write (or anything it can't classify) unless `--allow-mutation`
 is passed**. Never trust a caller-supplied label; the classifier is the source of truth, and `lint_skill.py`
-fails a `capture.json` whose `class` disagrees with the body.
+flags a step whose header `class` echo disagrees with the body.
 
 - **READ** (GET/HEAD, GraphQL `query`): safe to author + validate freely. No `--allow-mutation`.
 - **WRITE** with a **consequence-free** way to validate (e.g. a PDF/render mutation, or a sandbox/test
-  account): eligible — author with `--allow-mutation`, a recorded `approved_by`, validate once, mark `validated`.
+  account): eligible — author with `--allow-mutation`, a recorded `approved:` in the header, validate once, set `validated:`.
 - **WRITE with no safe validation target** (send/void invoice, refund, delete): **UI-only.** Do not API-ify it.
 
 ## Bail — keep the UI step
@@ -23,7 +23,7 @@ fails a `capture.json` whose `class` disagrees with the body.
 `detect_replayable.py` flags these at teaching time.
 
 ## Auth — climb a ladder, default to reading nothing
-Try the **first** rung that returns 2xx + a correct result; record the rung in `capture.json.auth` (a
+Try the **first** rung that returns 2xx + a correct result; note the rung in the provenance header (a
 **recipe** string, never a value):
 1. **`credentials:"include"`, no auth header** — the common cookie-session case; nothing to add.
 2. **+ a re-sourced non-httpOnly token** — add a header **only if rung 1 gets 401/403**, reading the token
@@ -42,5 +42,6 @@ cross-origin call (`page-origin → api-origin`) may not attach it. If no rung r
   fetch can't read, **unbounded** polling, or the body shape changes between runs (template won't generalize).
 
 ## Worked example
-See `skill-test-workflows/wave/steps/download-invoice.{md,ui.md,capture.json}` for the canonical shape:
-a WRITE (GraphQL mutation, consequence-free render) with a self-contained `mutation → pre-signed S3` chain.
+See `skill-test-workflows/wave/steps/download-invoice.md` for the canonical shape — one file (provenance
+header → `## API` → `## UI` → `## Report`): a WRITE (GraphQL mutation, consequence-free render) with a
+self-contained `mutation → pre-signed S3` chain.

@@ -1,10 +1,10 @@
 # reverse-engineer-api (Agent Skill)
 
 A **universal, teaching-mode helper** (a sibling of `skill-creator`). In teaching mode it converts one
-step of a *target* workflow skill into an API-backed step and writes it **inline into that step's file**
-— `## 1. API attempt` (a single `run-in-page` call) + `## 2. UI fallback` (the original UI, kept as the
-baseline) — plus a scrubbed `capture.json` sidecar. One fixed, reviewable, lintable pattern, the same for
-every client. It never stores any customer's API itself.
+step of a *target* workflow skill into an API-backed step by editing that step's **single file** in place
+— a one-line provenance header → `## API` (a single `run-in-page` call) → `## UI` (the original UI,
+unchanged) → `## Report`. One file per step, no sidecars: one fixed, reviewable, lintable pattern, the
+same for every client. It never stores any customer's API itself.
 
 ## What's in here
 - `SKILL.md` — the teaching-mode method the agent follows to produce the pattern.
@@ -23,12 +23,11 @@ every client. It never stores any customer's API itself.
 ## The output (in the target skill, never here)
 ```
 <client>/steps/
-  <step>.md            # §1 run-in-page API attempt + §2 UI fallback (one file the runtime reads)
-  <step>.ui.md         # immutable UI baseline (§2 must equal it — lint-enforced)
-  <step>.capture.json  # scrubbed audit/provenance + class + approver + success_predicate (runtime never reads it)
+  <step>.md   # ONE file: provenance header → ## API (run-in-page) → ## UI (fallback) → ## Report
 ```
-Normal sessions just run `<step>.md` (API, fall back to UI) and **never modify skills**; only teaching
-mode commits, human-reviewed.
+Provenance (class, approver, validated) is the one-line header comment; the original UI lives in `## UI`.
+No `.ui.md` / `.capture.json` sidecars. Normal sessions just run `<step>.md` (API, fall back to UI) and
+**never modify skills**; only teaching mode commits, human-reviewed.
 
 ## Runtime requirements
 - **Teaching-time:** Node (engine analysis), a CDP-enabled Chromium, `websocket-client`.

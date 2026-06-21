@@ -22,7 +22,9 @@ _MODEL_BASES = ("claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "gpt-
 _MODEL_EFFORTS = ("", "-low", "-medium", "-high", "-xhigh")
 VALID_MODELS = {b + e for b in _MODEL_BASES for e in _MODEL_EFFORTS}
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Login email/password ARE allowed inline in UI steps — the agent logs in with them (like the
+# Alphaskill/Metaview steps). What stays forbidden everywhere is runtime API auth that run-in-page must
+# re-source live: bearer/JWT/cookie/api-key/signed-url/opaque tokens.
 JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}")  # dotted JWT (eyJ…)
 LITERAL_BEARER_RE = re.compile(r"Bearer\s+(?!\$\{|\{\{)[A-Za-z0-9._\-]{16,}")
 SIGNED_URL_RE = re.compile(r"[?&](X-Amz-Signature|Signature|sig|token)=[A-Za-z0-9%._\-]{16,}", re.I)
@@ -64,7 +66,7 @@ def _section(md: str, heading: str) -> str:
 
 def _scan_secrets(rule: str, where: str, text: str) -> list[V]:
     out: list[V] = []
-    for label, rx in (("email", EMAIL_RE), ("jwt", JWT_RE), ("literal-bearer", LITERAL_BEARER_RE),
+    for label, rx in (("jwt", JWT_RE), ("literal-bearer", LITERAL_BEARER_RE),
                       ("signed-url", SIGNED_URL_RE), ("secret-assign", SECRET_ASSIGN_RE)):
         if rx.search(text):
             out.append(V(rule, where, f"possible {label} literal — secrets/identity must never be committed"))
@@ -141,14 +143,16 @@ def _lint_step(steps_dir: str, step: str, spec: dict) -> list[V]:
     hm = re.search(r"<!--(.*?)-->", step_md, re.DOTALL)
     header = hm.group(1) if hm else ""
 
-    for sec in ("## API", "## UI", "## Report"):
+    for sec in ("## API attempt", "## UI instructions"):
         if sec not in step_md:
             out.append(V("single-file-sections", f"{step}.md", f"API step missing '{sec}' section"))
-    api = _section(step_md, "## API")
+    if "Return value:" not in step_md:
+        out.append(V("single-file-sections", f"{step}.md", "API step missing a 'Return value:' block"))
+    api = _section(step_md, "## API attempt")
 
     # helper-by-name / one-call-in-api / no-repo-paths / inputs-not-envvars
     if "run-in-page" not in api:
-        out.append(V("helper-by-name-only", f"{step}.md", "the run-in-page call must live in the ## API section"))
+        out.append(V("helper-by-name-only", f"{step}.md", "the run-in-page call must live in the ## API attempt section"))
     if "/agent/skills/" in step_md or "replay_in_page" in step_md:
         out.append(V("helper-by-name-only", f"{step}.md", "skill-relative helper path — call run-in-page by name"))
     for bad in ("--js-file", ".capture.json", ".ui.md", "/tmp/", "-result.json"):

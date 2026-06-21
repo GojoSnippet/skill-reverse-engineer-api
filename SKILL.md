@@ -44,8 +44,9 @@ runtime. Confirm: `command -v run-in-page` and `curl -s http://127.0.0.1:9222/js
 
 ## Method
 
-1. **Read the current step.** `steps/<STEP>.md` is the UI baseline — its prose becomes the `## UI`
-   section verbatim. Don't lose it.
+1. **Read the current step.** `steps/<STEP>.md` is the UI baseline in mission style (Mission / Inputs /
+   Instructions / Return value / Important). Its **Instructions** block is the proven UI path — it becomes
+   the `## UI instructions` fallback **verbatim**. Don't rewrite or lose it.
 2. **Demonstrate + action-bounded capture.** Start capture, perform **exactly the one** action, stop:
    ```bash
    python scripts/capture_cdp.py --port 9222 --out .o11y/run1   # one action, then stop
@@ -55,18 +56,18 @@ runtime. Confirm: `command -v run-in-page` and `curl -s http://127.0.0.1:9222/js
 4. **Classify + bail check.** `python scripts/detect_replayable.py --run .o11y/run1` → signed/anti-bot ⇒
    keep UI. Note **read vs write** (GraphQL `mutation` / REST verb). A WRITE with no safe validation ⇒ **UI-only, stop.**
 5. **Edit `steps/<STEP>.md` in place** to the single-file pattern:
-   - **Header comment (one line):** `<!-- reverse-engineer-api · taught <date> · class READ|WRITE ·
-     approved: <human> (<why-safe, writes only>) · validated: <state> · regenerate via teaching mode -->`
-   - **`## API`** — (a) open the app first so the browser is up and on the logged-in origin (navigate to
-     the app URL); (b) build `--vars-json` from `<inputs>`; (c) **one** `run-in-page --contract 1
-     [--allow-mutation for writes] --match <origin> --out <path> --vars-json '…' --js '<in-page fetch with
-     {{vars}} returning {ok,…,download?:{url}}>'`; (d) **branch on the exit code only** — `0` ⇒ Report
-     success & stop; any other ⇒ do `## UI`, and tell the model **not** to investigate/read cookies/grep.
-   - **`## UI`** — the original prose from step 1, unchanged (the proven fallback). Prepend the **same
-     no-investigate / no-credential-hunting guard** here (this path touches login): if a UI step fails or
-     the page is not logged in, go straight to Report `OUTCOME: failure` — never dig for credentials.
-   - **`## Report`** — the fixed result block (`METHOD / OUTCOME / FILE / NOTE`) so every run states
-     plainly whether the API or UI path was used and whether it worked.
+   The edit is a **surgical insert, not a rewrite.** Keep **Mission** and **Inputs** at the top and
+   **Return value** / **Important** at the bottom exactly as they were. Only:
+   - **Add a header comment (one line) at the very top:** `<!-- reverse-engineer-api · taught <date> ·
+     class READ|WRITE · approved: <human> (<why-safe, writes only>) · validated: <state> · regenerate -->`
+   - **Insert `## API attempt` ABOVE the original instructions:** (a) build `--vars-json` from the Inputs;
+     (b) **one** `run-in-page --contract 1 [--allow-mutation for writes] --match <origin> --out <path>
+     --vars-json '…' --js '<in-page fetch with {{vars}} returning {ok,…,download?:{url}}>'`; (c) **branch on
+     the exit code only** — `0` ⇒ set Return value `method: api` + the path and stop; any other ⇒ do the UI
+     instructions below, and tell the model **not** to investigate / read cookies / grep.
+   - **Rename the original `Instructions:` heading to `## UI instructions`** — the numbered steps stay
+     **byte-for-byte** (the proven fallback). Don't touch them.
+   - **Add `method: "api" | "ui"`** to the **Return value** block so each run states which path ran.
    - **Auth ladder:** default `credentials:"include"` with **no** auth header; only climb to a
      live-re-sourced token if it 401/403s; never store a value. If auth needs an httpOnly token JS can't
      read and the cookie alone 401s ⇒ keep UI.

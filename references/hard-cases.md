@@ -43,5 +43,5 @@ cross-origin call (`page-origin → api-origin`) may not attach it. If no rung r
 
 ## Worked example
 See `skill-test-workflows/wave/steps/download-invoice.md` for the canonical shape — one file (provenance
-header → `## API` → `## UI` → `## Report`): a WRITE (GraphQL mutation, consequence-free render) with a
-self-contained `mutation → pre-signed S3` chain.
+header → Mission/Inputs → `## API attempt` → `## UI instructions` → Return value): a WRITE (GraphQL
+mutation, consequence-free render) with a self-contained `mutation → pre-signed S3` chain.

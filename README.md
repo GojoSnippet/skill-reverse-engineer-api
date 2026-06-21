@@ -2,8 +2,9 @@
 
 A **universal, teaching-mode helper** (a sibling of `skill-creator`). In teaching mode it converts one
 step of a *target* workflow skill into an API-backed step by editing that step's **single file** in place
-— a one-line provenance header → `## API` (a single `run-in-page` call) → `## UI` (the original UI,
-unchanged) → `## Report`. One file per step, no sidecars: one fixed, reviewable, lintable pattern, the
+— it keeps the step's Mission/Inputs, inserts a `## API attempt` (a single `run-in-page` call) **above**
+the original instructions, and preserves those instructions **verbatim** as `## UI instructions`, under a
+one-line provenance header. One file per step, no sidecars: one fixed, reviewable, lintable pattern, the
 same for every client. It never stores any customer's API itself.
 
 ## What's in here
@@ -23,9 +24,9 @@ same for every client. It never stores any customer's API itself.
 ## The output (in the target skill, never here)
 ```
 <client>/steps/
-  <step>.md   # ONE file: provenance header → ## API (run-in-page) → ## UI (fallback) → ## Report
+  <step>.md   # ONE file, mission style: header → Mission/Inputs → ## API attempt → ## UI instructions → Return value
 ```
-Provenance (class, approver, validated) is the one-line header comment; the original UI lives in `## UI`.
+Provenance (class, approver, validated) is the one-line header comment; the original UI lives verbatim in `## UI instructions`.
 No `.ui.md` / `.capture.json` sidecars. Normal sessions just run `<step>.md` (API, fall back to UI) and
 **never modify skills**; only teaching mode commits, human-reviewed.
 

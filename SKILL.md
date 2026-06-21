@@ -72,7 +72,11 @@ Transcribe the candidate — do not hand-write:
   the auth header from the readable token (e.g. a cookie value); **never a literal token**.
 - the returned `ok` predicate is derived from `responseExampleKeys` — require the **real success fields the
   captured response has** (e.g. `pdfUrl`) plus status. **Do not invent fields** (the `didSucceed` mistake).
-- for a binary, return `download:{url}` so the helper streams it to `--out`.
+- **Binary output** — `run-in-page` writes `--out` from one of two fields you return; you do NOT need to
+  read its source to learn this:
+  - the response gives a **download URL** (e.g. pre-signed S3) → return `download: { url: "<that url>" }` and the helper fetches it.
+  - the response gives the **bytes inline as base64** (e.g. an export mutation) → return `dataBase64: "<the base64 string>"` and the helper decodes it.
+  Everything you need is in this file and `run-in-page --help`; **do not read `run-in-page`'s source.**
 
 ### 6. Validate — run it once
 `probe_auth.py` already found the auth, so just run the `run-in-page` command once to confirm end-to-end:

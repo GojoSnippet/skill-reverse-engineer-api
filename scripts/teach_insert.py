@@ -21,7 +21,7 @@ import argparse
 import sys
 
 
-def transform(step_md: str, header: str, api_body: str) -> str:
+def transform(step_md: str, header: str, command: str) -> str:
     if "## API attempt" in step_md:
         raise ValueError("already has a '## API attempt' section — regenerate from a clean UI-only baseline")
     if "Instructions:" not in step_md:
@@ -30,7 +30,18 @@ def transform(step_md: str, header: str, api_body: str) -> str:
         raise ValueError("not a mission-style UI step (no 'Return value:' block)")
 
     before, after = step_md.split("Instructions:", 1)  # `after` = the numbered steps, kept verbatim
-    api_block = f"## API attempt\n\n{api_body.strip()}\n\n## UI instructions"
+    # The run+branch wrapper is FIXED here (not left to the generator) so every taught step tells the
+    # skill-blind executor to actually run the command first and only fall back to the UI on failure.
+    api_block = (
+        "## API attempt\n\n"
+        "**Do this first — do not skip to the UI.** Replace each `{{...}}` below with the matching value "
+        "from your inputs, then run the command.\n"
+        "- **Exit code 0** → the output file is saved. Set Return value `method: api` and STOP.\n"
+        "- **Any other exit code** → only then do the `## UI instructions` below. Do not investigate, read "
+        "cookies, or click around first — just do the UI steps.\n\n"
+        "```bash\n" + command.strip() + "\n```\n\n"
+        "## UI instructions"
+    )
     body = before + api_block + after
 
     # record which path ran: add `method` as the first Return value bullet (once)
@@ -45,18 +56,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="teach_insert")
     ap.add_argument("--step", required=True, help="path to the mission-style UI-only steps/<STEP>.md")
     ap.add_argument("--header", required=True, help="provenance line WITHOUT the <!-- --> markers")
-    ap.add_argument("--api", default=None, help="file with the ## API attempt body; omit to read stdin")
+    ap.add_argument("--command", default=None, help="file with the run-in-page command; omit to read stdin")
     args = ap.parse_args(argv)
 
     with open(args.step) as f:
         step_md = f.read()
-    api_body = open(args.api).read() if args.api else sys.stdin.read()
-    if not api_body.strip():
-        print("error: empty API body", file=sys.stderr)
+    command = open(args.command).read() if args.command else sys.stdin.read()
+    if not command.strip():
+        print("error: empty command", file=sys.stderr)
         return 2
 
     try:
-        out = transform(step_md, args.header, api_body)
+        out = transform(step_md, args.header, command)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

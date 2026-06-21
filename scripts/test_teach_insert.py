@@ -37,9 +37,10 @@ def test_header_on_top():
     out = t.transform(UI_ONLY, HEADER, API)
     assert out.startswith("<!-- reverse-engineer-api · taught 2026-06-21"), out[:60]
 
-def test_api_section_present_with_body():
+def test_api_section_has_command_and_run_branch():
     out = t.transform(UI_ONLY, HEADER, API)
-    assert "## API attempt\n\nrun-in-page --contract 1" in out
+    assert "```bash\nrun-in-page --contract 1" in out  # command in a runnable shell fence
+    assert "Do this first" in out and "method: api` and STOP" in out  # the run+branch instruction
 
 def test_ui_steps_preserved_byte_for_byte():
     out = t.transform(UI_ONLY, HEADER, API)

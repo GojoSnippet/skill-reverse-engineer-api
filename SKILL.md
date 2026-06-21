@@ -59,7 +59,7 @@ Flags a signature / HMAC / nonce / CAPTCHA / anti-bot → **keep UI** (step 7, c
 Case 4 — if the app has an official API and a token is configured for it, prefer a `curl` official-API
 step (most robust; no browser). Case 5 — signed/anti-bot → UI. (See `references/hard-cases.md`.)
 
-### 5. Build the faithful replay (cases 1 & 2) → write the `## API attempt` body to `/tmp/api.md`
+### 5. Build the faithful replay (cases 1 & 2) → write the `run-in-page` COMMAND (the invocation only, no prose) to `/tmp/command.sh`
 Transcribe the candidate — do not hand-write:
 - one `run-in-page --contract 1 [--allow-mutation for a write] --match <origin> --out <path>
   --vars-json '<inputs JSON>' --js '<fetch>'`
@@ -83,10 +83,11 @@ Run the `run-in-page` once.
   ```bash
   python scripts/teach_insert.py --step "$TARGET_SKILL/steps/<STEP>.md" \
     --header "reverse-engineer-api · taught <date> · class READ|WRITE · approved: <human> (<why-safe>) · validated: <state>" \
-    --api /tmp/api.md
+    --command /tmp/command.sh
   ```
-  (This edits ONLY the step file, inserts `## API attempt` above the originals, and preserves them
-  verbatim as `## UI instructions`. Do not edit the file by hand — that churns the UI and other files.)
+  (This edits ONLY the step file. It wraps your command in the fixed **run-this-first / branch-on-exit**
+  instruction, inserts it as `## API attempt` above the originals, and preserves them verbatim as
+  `## UI instructions`. Do not edit the file by hand — that churns the UI and drops the run instruction.)
 - **Keep UI (case 3/5):** do NOT touch the step file; write the structured reason in the report.
 
 ### 8. Verify discipline + report

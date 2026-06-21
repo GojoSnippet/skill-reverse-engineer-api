@@ -1,43 +1,46 @@
-# Hard cases — when to bail to the UI (and the few you can handle)
+# Hard cases — read/write, auth, chains, and when to bail
 
-The default is **API with UI fallback**. When in doubt, keep the UI step. A correct UI run beats an
-API step that 200s in dev and 403s in prod. `detect_replayable.py` flags most of these automatically.
+Default: **API attempt with UI fallback**. When in doubt, keep the UI step. A correct UI run beats an
+API step that 200s in dev and 403s in prod.
+
+## Read vs write (the gate `run-in-page` enforces)
+`run-in-page` derives **read|write** from the fetch body itself — GraphQL `mutation` keyword, or REST
+`POST/PUT/PATCH/DELETE` — and **refuses a write (or anything it can't classify) unless `--allow-mutation`
+is passed**. Never trust a caller-supplied label; the classifier is the source of truth, and `lint_skill.py`
+fails a `capture.json` whose `class` disagrees with the body.
+
+- **READ** (GET/HEAD, GraphQL `query`): safe to author + validate freely. No `--allow-mutation`.
+- **WRITE** with a **consequence-free** way to validate (e.g. a PDF/render mutation, or a sandbox/test
+  account): eligible — author with `--allow-mutation`, a recorded `approved_by`, validate once, mark `validated`.
+- **WRITE with no safe validation target** (send/void invoice, refund, delete): **UI-only.** Do not API-ify it.
 
 ## Bail — keep the UI step
+- **Signed / HMAC bodies** (`x-sig`, `signature`, `_hmac`, `checksum`): minted by in-page JS; a stale one is rejected.
+- **Per-request nonces**: single-use; the captured one won't replay.
+- **CAPTCHA / Turnstile / reCAPTCHA**: only the live page mints these.
+- **Active anti-bot** (`403`/`429` with Cloudflare/DataDome/Akamai/PerimeterX markers in the trace).
 
-- **Signed / HMAC bodies.** A field whose value is a signature/hash computed by in-page JS (e.g.
-  `x-sig`, `signature`, `_hmac`, `checksum`). You can't recompute it; the server rejects a stale one.
-- **Per-request nonces.** A single-use token the server expects to differ each call. Replaying the
-  captured one fails.
-- **CAPTCHA / Turnstile / reCAPTCHA tokens.** Only the live page can mint these.
-- **Active anti-bot challenges.** A `403`/`429` with Cloudflare/DataDome/Akamai/PerimeterX markers in
-  the captured responses. (In-page fetch is same-origin and *usually* avoids passive anti-bot, but an
-  active challenge in the trace means stop.)
-- **Non-idempotent calls without a safe target.** `POST`/`PUT`/`PATCH`/`DELETE` that mutate. Do not
-  auto-run them to "validate" — you'd double-submit. Convert these only with an explicit sandbox/test
-  account, and only after the read-only steps are proven.
+`detect_replayable.py` flags these at teaching time.
 
-## Handle — these are fine with care
+## Auth — climb a ladder, default to reading nothing
+Try the **first** rung that returns 2xx + a correct result; record the rung in `capture.json.auth` (a
+**recipe** string, never a value):
+1. **`credentials:"include"`, no auth header** — the common cookie-session case; nothing to add.
+2. **+ a re-sourced non-httpOnly token** — add a header **only if rung 1 gets 401/403**, reading the token
+   live, e.g. `Authorization: "Bearer " + (document.cookie… or localStorage.getItem("token"))`. Never hardcode it.
+3. **+ a token from app JS state** (`window.__APOLLO_STATE__`, etc.) when it's not in a readable cookie/storage.
 
-- **Cookie/session auth (the common case).** In-page `fetch(..., { credentials: "include" })` sends
-  cookies automatically. Nothing to do.
-- **CSRF tokens / custom required headers.** `analyze.py` surfaces these as `customHeaders` (anything
-  not browser-auto). Include them in the fetch. With an in-page fetch the token is valid because it's
-  the same session.
-- **Bearer / `Authorization` / token headers.** These are **NOT** sent automatically by `fetch` — the
-  app's JS normally adds them from storage. Read the token live from the page and add the header, e.g.
-  `headers: { Authorization: "Bearer " + localStorage.getItem("token") }`. Never hardcode it.
-  (`observedAuthHeaders` tells you when one was used.)
-- **GraphQL / multiplexed endpoints.** `analyze.py` reports `operationName`, `parentPath`, and
-  `discriminatorField`. Build the fetch to POST that one operation to `parentPath` (for persisted
-  queries, include the `sha256Hash` from the captured request). Parameterize the `variables`.
+**httpOnly / cross-origin caveat:** if the token lives in an httpOnly cookie, JS can't read it — and a
+cross-origin call (`page-origin → api-origin`) may not attach it. If no rung re-sources auth in-page, **bail to UI.**
 
-## Tricky — usually bail for v1
+## Chains — handle self-contained, bail cross-step
+- **Handle (inline into the one JS):** every value a later call needs is produced **inside the captured
+  trace** and reproduced **inside the same in-page expression** — including a **bounded poll-with-timeout**
+  (e.g. `mutation → poll status → pre-signed-URL GET`). The Wave example (`InvoiceGeneratePdf → pdfUrl → S3`)
+  qualifies: `run-in-page` returns `download:{url}` and fetches the pre-signed URL to `--out` itself.
+- **Bail (UI):** a needed value came from an **uncaptured prior UI step**, an httpOnly cookie/redirect the
+  fetch can't read, **unbounded** polling, or the body shape changes between runs (template won't generalize).
 
-- **Multi-call chains.** When the target call needs a value produced by an earlier call (a token,
-  a cursor, an id) that the UI obtained in a prior step. Capturing one call isn't enough; you'd have
-  to replay the chain. Bail to the UI unless the dependency is trivial and stable.
-- **Parameters that change *structure*, not just value.** If different runs send a differently-shaped
-  body (not just different field values), the template won't generalize. Keep the UI step.
-- **Auth that expires mid-session or rotates on 401.** Re-source live each run; if it still 401s,
-  fall back to the UI.
+## Worked example
+See `skill-test-workflows/wave/steps/download-invoice.{md,ui.md,capture.json}` for the canonical shape:
+a WRITE (GraphQL mutation, consequence-free render) with a self-contained `mutation → pre-signed S3` chain.

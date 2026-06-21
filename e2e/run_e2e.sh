@@ -52,11 +52,11 @@ if grep -rq secret123 "$WORK/run1/api-spec/samples" 2>/dev/null; then fail "anal
 echo "== decide =="
 "$PY" "$SKILL/scripts/detect_replayable.py" --run "$WORK/run1" >/dev/null; [ $? -eq 0 ] && pass "decide: replayable verdict" || fail "decide: replayable verdict"
 
-echo "== in-page fetch executor (offline, same-origin) =="
+echo "== run-in-page executor (offline, same-origin, correct-tab) =="
 launch_chrome test_page.html
-JS='(async()=>{const r=await fetch(location.href);return{status:r.status,ok:r.ok};})()'
-OUT="$(echo "$JS" | "$PY" "$SKILL/scripts/replay_in_page.py" --port "$PORT" 2>/dev/null)"
-echo "$OUT" | grep -q '"status": 200' && pass "replay_in_page: in-page fetch returns 200" || fail "replay_in_page: in-page fetch ($OUT)"
+JS='(async()=>{const r=await fetch(location.href);return{ok:r.status===200,status:r.status};})()'
+OUT="$(echo "$JS" | "$PY" "$SKILL/scripts/run_in_page.py" --contract 1 --match 127.0.0.1 --port "$PORT" 2>/dev/null)"
+echo "$OUT" | grep -q '"status": 200' && pass "run-in-page: in-page fetch returns 200 (read, no --allow-mutation)" || fail "run-in-page: in-page fetch ($OUT)"
 free_chrome
 
 echo "== bail-to-UI (signed page) =="

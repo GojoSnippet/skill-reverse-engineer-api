@@ -1,132 +1,88 @@
 ---
 name: reverse-engineer-api
 description: >-
-  Teaching-mode helper: convert one existing UI workflow step into a faster API-backed version that
-  runs as an in-page fetch in the already-authenticated browser, then write it INTO the target
-  workflow skill (default to API, fall back to UI). Use this when a human in teaching mode asks to
-  make a step use the API instead of clicking, reverse engineer the API behind a step, "apify" a
-  step, or make a workflow cheaper/faster. Trigger words: reverse engineer api, use the api, apify,
-  make this cheaper, convert this step to api, skip the UI for this step.
+  Teaching-mode helper: convert one existing UI workflow step into a faster API-backed version. It
+  writes the result INLINE into the target step's file (§1 a single run-in-page call, §2 the original
+  UI as fallback) plus a scrubbed capture.json sidecar — one fixed, reviewable, lintable pattern. Use
+  when a human in teaching mode asks to make a step use the API instead of clicking, reverse engineer
+  the API behind a step, "apify" a step, or make a workflow cheaper/faster. Trigger words: reverse
+  engineer api, use the api, apify, make this cheaper, convert this step to api, skip the UI.
 ---
 
 # Reverse-Engineer-API (teaching-mode helper)
 
-This is a **universal helper skill**, like `skill-creator`. It does **not** hold any customer's API.
-It teaches you, **in teaching mode**, how to take one step of a *target workflow skill* and produce an
-**API-backed version of that step** — committed into the **target** skill, never into this one.
+A **universal helper**, like `skill-creator`. In **teaching mode** it converts one step of a *target
+workflow skill* into an API-backed step, written **inline** into that step's file. Normal sessions just
+run the step; they never use this skill and never edit skills.
 
-- **Teacher / tool:** this skill.
-- **Student / output:** the target workflow skill (e.g. `metaview/`), where the learned call lives.
-
-The committed call runs as an **in-page `fetch()`** inside the agent's authenticated browser: cookies
-ride the live session automatically, it's same-origin (anti-bot won't block it), and there's no Node
-or extra runtime needed. The target step then **defaults to the API and falls back to the UI**.
+- **Teacher/tool:** this skill. **Student/output:** the target workflow skill (e.g. `wave/`).
+- The committed call runs as an **in-page `fetch()`** via the on-PATH `run-in-page` helper. The step
+  **tries the API (§1) and falls back to the UI (§2)** in one file. There is **no `-api.md` sibling**.
 
 ## Inputs (from the human's instruction)
-- `TARGET_SKILL` — path to the workflow skill to improve, e.g. `/agent/skills/editable/metaview`.
-- `STEP` — the step to convert, e.g. `open-and-download-summary` (its UI version is `steps/<STEP>.md`).
+- `TARGET_SKILL` — path to the **editable** workflow skill, e.g. `/agent/skills/editable/<repo>/wave`.
+- `STEP` — the step to convert; its current UI prose is `steps/<STEP>.md`.
 
-## When NOT to do this — bail and keep the UI step
-Run `detect_replayable.py` (below). Bail (leave the UI step as-is) if the request carries a value only
-the live page JS can mint — a **signature/HMAC**, a per-request **nonce**, a **CAPTCHA/Turnstile**
-token — or the site shows an active **anti-bot** challenge, or the call is **non-idempotent** and you
-have no safe/sandbox target. See `references/hard-cases.md`. Better a correct UI run than an API step
-that 200s in dev and 403s in prod.
+## When NOT to do it — keep the UI step
+- `detect_replayable.py` flags a **signature/HMAC/nonce**, **CAPTCHA/Turnstile**, or active **anti-bot**
+  → keep the UI step (a correct UI run beats a script that 200s in dev and 403s in prod).
+- **Policy:** a **WRITE** (mutation / POST-PUT-PATCH-DELETE) with **no consequence-free way to validate**
+  stays **UI-only** — do not API-ify it. Reads, and writes you can safely re-run (e.g. a render), are eligible.
 
 ## Safety (always)
-- **Start with read-only / idempotent steps** (downloads, lists, gets). Do not auto-run mutations.
-- **Never `git commit`/`git push` yourself.** You write files into the target skill's working tree;
-  the **human reviews the diff and commits** (teaching mode). Outside teaching mode, never modify skills.
-- On the live site: **no delete, no modify, no data leakage.** Re-source auth from the live session;
-  never hardcode tokens.
+- **Never `git commit`/`git push` yourself.** You write files into the editable target skill; the
+  **human reviews the diff and commits**. Outside teaching mode, never modify skills.
+- **No secrets/identity in the committed artifact.** `run-in-page` re-sources auth live each run; the
+  `capture.json` records only a *recipe* string, never a token/cookie/account-id. `lint_skill.py` enforces this.
+- On the live site: no delete, no modify, no data leak.
 
-## Prerequisite — Chromium with the CDP port
-```bash
-curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1 \
-  || (DISPLAY=:1 /usr/local/bin/chromium >/tmp/chromium.log 2>&1 &) && sleep 2
-```
+## Prerequisite — `run-in-page` on PATH + a CDP-enabled Chromium
+`run-in-page`, `websocket-client`, and a Chromium with a loopback CDP debug port are baked into the
+runtime. Confirm: `command -v run-in-page` and `curl -s http://127.0.0.1:9222/json/version`.
 
-## Method
+## Method — produce the pattern
 
-1. **Demonstrate + capture.** With the human, perform the target step once in the UI while recording:
+1. **Demonstrate + action-bounded capture.** Start capture, perform **exactly the one** action, stop —
+   don't leave a wide time window of unrelated traffic.
    ```bash
-   python scripts/capture_cdp.py --port 9222 --seconds 90 --out .o11y/run1
+   python scripts/capture_cdp.py --port 9222 --out .o11y/run1   # one action, then stop
    ```
+2. **Analyze.** `python scripts/analyze.py --run .o11y/run1 [--match <url-substr>]` → pick the candidate
+   matching the action (note `method`, `url`/origin, params, `requestExample`, `customHeaders`, `observedAuthHeaders`).
+3. **Classify + bail check.** `python scripts/detect_replayable.py --run .o11y/run1` → signed/anti-bot
+   ⇒ bail. Note **read vs write** (GraphQL `mutation` / REST verb). A WRITE with no safe validation target ⇒ **UI-only, stop**.
+4. **Author the inline step + sidecar** (the fixed pattern):
+   - `steps/<STEP>.ui.md` — the current UI prose, kept as the **immutable baseline** (if not present).
+   - `steps/<STEP>.md` — `<!-- @generated … class: READ|WRITE (from the classifier, never a blind label) … auth: <rung> … -->`,
+     a one-line what/default/fallback, then **`## 1. API attempt`** (build `--vars-json` from `<inputs>`;
+     **one** `run-in-page --contract 1 [--allow-mutation for writes] --match <origin> --out <path>
+     --vars-json '…' --js '<in-page fetch with {{vars}} returning {ok,…,download?:{url}}>'`; **branch on
+     the exit code only**), then **`## 2. UI fallback`** = `steps/<STEP>.ui.md` **verbatim**.
+   - **Auth ladder:** default `credentials:"include"` with **no** auth header; add a **live-re-sourced**
+     token only if it 401/403s; record the rung in `capture.json.auth` (recipe only, never a value).
+   - **Strong success predicate** in the returned `ok` (not bare 2xx): **expected status + content-type +
+     a positive shape signal** from the demo response; `run-in-page` also checks the `--out` file is non-empty/typed.
+   - **Chains:** inline a **self-contained** chain (every later value produced in the trace), including a
+     **bounded poll-with-timeout**, into the one JS; **bail to UI** if it needs an uncaptured value, unbounded polling, or cross-step state.
+   - `steps/<STEP>.capture.json` (`schema: reverse-engineer-api/capture@1`) — provenance + `class` +
+     `approved_by` + `validated` + `success_predicate` + auth recipe + normalized `template`. **Scrubbed.**
+   - Add the new `required_step_inputs` to the target `SKILL.md` (the vars + `allow_mutation` for writes).
+5. **Validate by running it once.** Run the §1 `run-in-page` (reads freely; an eligible write once against
+   a safe target). **Re-run with a different input** to prove the template generalizes. Set `validated` honestly
+   (or `NOT VALIDATED — <why>` if no safe target).
+6. **Lint.** `python scripts/lint_skill.py "$TARGET_SKILL"` → must be **CLEAN**.
+7. **Stop — hand to the human.** Report the diff; the human reviews and commits.
 
-2. **Analyze (engine brain, no noise files).** Runs the vendored engine's analysis stages only
-   (`load→filter→normalize→infer`, never `emit`) and prints candidate endpoints:
-   ```bash
-   python scripts/analyze.py --run .o11y/run1            # add --match <url-substr> to narrow
-   ```
-   Pick the candidate matching the action you just demonstrated. Note its `method`, `url`,
-   `pathParams`/`queryParams` (the per-run parameters), `requestExample` (body template),
-   `customHeaders` (app-specific headers the fetch needs, e.g. CSRF), and `observedAuthHeaders`.
-
-3. **Decide replayable vs bail.**
-   ```bash
-   python scripts/detect_replayable.py --run .o11y/run1   # exit 3 = BAIL TO UI (read "reasons")
-   ```
-
-4. **Write the in-page fetch and validate it once.** Author the `fetch()` for the chosen endpoint as
-   an async IIFE that returns a small result, parameterizing the per-run inputs. Auth notes:
-   - **Cookies are automatic** with `credentials: "include"` — do nothing.
-   - **Bearer/`Authorization` or token headers are NOT automatic** — read them live from the page,
-     e.g. `localStorage.getItem('token')`, and add the header. (`observedAuthHeaders` tells you if one
-     was used.)
-   - **Add only `customHeaders`** from step 2 (CSRF, `x-requested-with`, content-type). The browser
-     sets origin/referer/sec-*/cookie itself.
-
-   Validate by running it once in the live browser (read-only = safe), then diff against the UI result:
-   ```bash
-   python scripts/replay_in_page.py --port 9222 --js-file /tmp/try.js
-   ```
-   Re-run with a **different parameter value** to confirm the template generalizes. Only proceed on a
-   2xx + a result that matches the demonstrated outcome.
-
-5. **Write the API step into the TARGET skill.** Create `"$TARGET_SKILL"/steps/<STEP>-api.md` (see
-   the template below). Then edit `"$TARGET_SKILL"/SKILL.md` so the step **defaults to the API version
-   and falls back to the UI**: e.g. *"For `<STEP>`: run `steps/<STEP>-api.md`; if it errors / returns
-   4xx / auth fails, run `steps/<STEP>.md` (UI)."*
-
-6. **Stop — hand to the human.** Report what changed and let the human review the diff and commit. Do
-   not commit or push.
-
-## The `<STEP>-api.md` step you write (template)
-````markdown
-# <STEP> — API version (default; falls back to steps/<STEP>.md on failure)
-
-Run this in-page fetch in the authenticated browser. Cookies ride the session; this is read-only.
-
-Parameters: <list the per-run inputs, e.g. {meetingId}>
-
-```bash
-cat > /tmp/<STEP>.js <<'JS'
-(async () => {
-  const r = await fetch("https://HOST/api/...{meetingId}...", {
-    method: "GET",
-    credentials: "include",
-    headers: { /* only app-specific headers, e.g. "x-csrf-token": "..." */ },
-  });
-  const body = await r.text();
-  return { status: r.status, ok: r.ok, len: body.length, body: body.slice(0, 4000) };
-})()
-JS
-python <reverse-engineer-api>/scripts/replay_in_page.py --port 9222 --js-file /tmp/<STEP>.js
-```
-
-If the fetch errors, returns a non-2xx status, or the result looks wrong: **fall back to the UI step**
-`steps/<STEP>.md`.
-````
+See `references/hard-cases.md` for the worked Wave example and the full read/write, auth, and chain rules.
 
 ## Bundled scripts
-- `scripts/capture_cdp.py` — record the demonstrated step's traffic via CDP (ours).
-- `scripts/_engine/` — Browserbase `browser-to-api` engine (MIT, vendored, **unmodified**). We run only
-  its analysis stages; never `emit`.
-- `scripts/analyze.py` — run the engine's `load..infer` and surface candidate endpoints (ours).
-- `scripts/detect_replayable.py` — bail-to-UI classifier (ours).
-- `scripts/replay_in_page.py` — run an in-page `fetch()` over CDP and return the result (ours); both the
-  teaching-time validator and the runtime executor for the committed step.
+- `scripts/capture_cdp.py` — CDP capture of the demonstrated action (teaching-time).
+- `scripts/_engine/` — Browserbase `browser-to-api` engine (MIT, vendored, **unmodified**; analysis stages only, never `emit`).
+- `scripts/analyze.py` — surface candidate endpoints (teaching-time).
+- `scripts/detect_replayable.py` — signed/anti-bot bail + read/write note (teaching-time).
+- `scripts/run_in_page.py` — source for **`run-in-page`**, the generic on-PATH runtime helper (body-derived
+  read/write gate, success-predicate→exit, correct-tab, binary-to-file). The runtime installs it on PATH.
+- `scripts/lint_skill.py` — the CI gate that enforces this pattern in every client repo.
 
 ## References
-- `references/hard-cases.md` — signed bodies, anti-bot, GraphQL operations, multi-call chains,
-  bearer tokens, and exactly when to bail to the UI.
+- `references/hard-cases.md` — signed bodies, anti-bot, GraphQL, chains, auth ladder, and when to bail.

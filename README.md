@@ -7,6 +7,10 @@ the original instructions, and preserves those instructions **verbatim** as `## 
 one-line provenance header. One file per step, no sidecars: one fixed, reviewable, lintable pattern, the
 same for every client. It never stores any customer's API itself.
 
+**→ Operators (onboarding a client / doing this day to day): start with
+[`docs/operator-playbook.md`](docs/operator-playbook.md)** — the 5-step guide + the step-file and
+teaching-prompt templates. Everything below is the technical/agent-facing detail.
+
 ## What's in here
 - `SKILL.md` — the teaching-mode method the agent follows to produce the pattern.
 - `scripts/capture_cdp.py` — CDP capture of the demonstrated action (teaching-time).

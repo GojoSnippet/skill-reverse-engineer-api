@@ -17,7 +17,9 @@ Confirm you reach <the landing page>, then stop.
 Use the reverse-engineer-api skill in teaching mode to convert the <skill> "<step>" step into an
 API-backed step.
 - Target (editable): the <skill> skill, step "<step>".
-- Read reverse-engineer-api's SKILL.md and follow its Procedure exactly.
+- Read reverse-engineer-api's SKILL.md and follow its Procedure exactly, including its HARD RULES: trust
+  analyze.py + probe_auth, build the command once, validate once (one fix max). Do NOT inspect the capture
+  with python, loop run-in-page, or read any script's source.
 - I'm already logged in. [PREP if the action needs setup: <reach the state where the action is possible>.]
   Capture ONLY the action: capture --start -> do the action ONCE -> capture --stop.
 - Do NOT git commit — I'll review the diff.

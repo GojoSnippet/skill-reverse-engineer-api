@@ -29,6 +29,18 @@ the UI** and says why. Normal sessions never use this skill.
 
 ## Procedure — do exactly this, in order
 
+> **HARD RULES — this is the whole point (keeping the teach cheap).** This is a FIXED, short sequence.
+> Each script's printed output is the **source of truth** — trust it and move on; never verify it by hand.
+> Your entire analysis budget is about **1× capture · 1× analyze.py · 1× detect_replayable · 1× probe_auth ·
+> 1× build the command · 1× validate**. If you are on a **3rd `run-in-page`**, writing **`python` to inspect
+> the capture**, or **reading a script's source** — STOP: you are off-procedure and burning money.
+>
+> **NEVER:**
+> - write `python`/`python3 -c` to open or inspect `.o11y/` capture files — `analyze.py`'s output is all you get and all you need.
+> - run `run-in-page` more than **once to validate + at most one fix** on failure — then bail to UI.
+> - read the source of `run-in-page` / `analyze.py` / `teach_insert.py` / etc. — everything is here and in `--help`.
+> - re-run `analyze.py` or `probe_auth.py` to "double-check" — **one run each, trust it**.
+
 ### 1. Capture the demo (ONE action)
 ```bash
 python scripts/capture_cdp.py --out .o11y/run --start    # begin capture (background)
@@ -40,8 +52,10 @@ python scripts/capture_cdp.py --out .o11y/run --stop     # end capture
 ```bash
 python scripts/analyze.py --run .o11y/run --match <url-substr-of-the-action>
 ```
-Pick the ONE candidate matching the action. Note its `method`, `url`, `operationName`, `customHeaders`,
-`requestExample`, `observedAuthHeaders`, `responseExampleKeys`.
+Pick the ONE candidate matching the action **from `analyze.py`'s printed output** (by `--match` and
+`operationName`). Note its `method`, `url`, `operationName`, `customHeaders`, `requestExample`,
+`observedAuthHeaders`, `responseExampleKeys`. **Do NOT open the raw `.o11y/` files or write python to
+inspect them — `analyze.py` already parsed everything.** If `--match` returns too many, narrow it; don't dig.
 
 ### 3. Bail check
 ```bash
@@ -77,11 +91,16 @@ Transcribe the candidate — do not hand-write:
   - the response gives a **download URL** (e.g. pre-signed S3) → return `download: { url: "<that url>" }` and the helper fetches it.
   - the response gives the **bytes inline as base64** (e.g. an export mutation) → return `dataBase64: "<the base64 string>"` and the helper decodes it.
   Everything you need is in this file and `run-in-page --help`; **do not read `run-in-page`'s source.**
+- **Chains** (one call's output feeds the next — e.g. a `BootstrapSynthesis` id → an `Export` mutation):
+  both requests are already candidates in `analyze.py`'s output. Assemble **both** calls inside the single
+  `--js`, in order, in **one** build — do NOT iterate `run-in-page` to "discover" the chain.
 
-### 6. Validate — run it once
-`probe_auth.py` already found the auth, so just run the `run-in-page` command once to confirm end-to-end:
-- **exit 0 + a correct, typed `--out` file** → `validated: yes (ran live, <evidence>)`.
-- **any other exit** → keep UI (case 3). **STOP** — no manual probing, ever.
+### 6. Validate — run it once (one fix max)
+`probe_auth.py` already found the auth, so run the `run-in-page` command **once**:
+- **exit 0 + a correct, typed `--out` file** → `validated: yes (ran live, <evidence>)`. Go to step 7.
+- **non-zero** → make **exactly ONE** fix from the error message (an obvious wrong field name / missing
+  header / wrong predicate) and re-run **once**. Still failing → **keep UI (case 3). STOP.**
+- **Never** enter a tune-and-retry loop or hand-probe — that loop is the expensive mistake we are killing.
 
 ### 7. Write the outcome — mechanically, never by hand-editing the file
 - **API-able (case 1/2 validated):**

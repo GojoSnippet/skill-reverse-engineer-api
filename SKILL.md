@@ -94,11 +94,19 @@ python scripts/probe_auth.py --match <origin> --request /tmp/req.json --expect-s
   does the chain produce the output by itself? If any value it needs only exists because a human set it up
   (an already-applied operation id, a pre-selected template) → the chain is INCOMPLETE; add the call that
   creates that state. **Never** parameterise on such a value.
+- **Async = POLL the ready signal, NEVER a fixed sleep (non-negotiable).** If the UI waits before the final
+  action (a "Saved" / checkmark / status), the work is happening async on the server. The chain MUST **re-query
+  the status until it reports ready** (e.g. `COMPLETE`/`DONE`), with a sane timeout, then act. A fixed
+  `setTimeout(8000)` is a **race**: it passes the gate the one time the server is fast, then fails on reuse the
+  first time it's slow (the export comes back with no file). The ready signal the UI watches for is in the
+  capture (e.g. a status query) — poll *that*.
 
 ### 6. THE EQUIVALENCE GATE — prove it on a FRESH instance (the whole point)
 - Pick a **second, fresh instance** the chain was NOT built on (a different note/record). If none exists,
   reset the captured one to its clean state.
-- Run the API chain on it → `/tmp/api_out.<ext>`.
+- Run the API chain on it → `/tmp/api_out.<ext>`. **Run it at least TWICE** (ideally on two different
+  instances). A single success does not prove reliability — an async race can pass once and fail the next time.
+  If **any** run fails or returns no file, the chain is NOT reliable → fix the poll (step 5), do not ship.
 - Produce the UI golden **on that same fresh instance** → `/tmp/golden_fresh.<ext>` (do the UI action once;
   reuse `/tmp/golden.<ext>` only if it is literally the same instance).
 - ```bash

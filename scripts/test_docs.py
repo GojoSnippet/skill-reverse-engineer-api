@@ -60,12 +60,18 @@ def test_step_template_says_whole_segment_including_setup() -> None:
     assert "WHOLE data segment, including any SETUP" in STEP
     assert "captures the ENTIRE\n    chain" in STEP
 
+def test_step_template_is_generic() -> None:
+    # the UI-step template is filled per app; it must not bake one app's UI phrasing into the slots.
+    for banned in ("apply a template", '"Saved"', "One Pager", "Metaview", "Wave", "GraphQL"):
+        assert banned not in STEP, f"step template leaked {banned!r} — keep slots app-agnostic"
+
 
 # ---- teach-prompt: short, generic, gate-disciplined ----
 def test_teach_prompt_is_generic() -> None:
-    # app/protocol names only inside the clearly-labeled example block, never in the reusable prompt
+    # app/protocol names AND app-specific UI phrasing only inside the clearly-labeled example block, never in
+    # the reusable prompt (a literal UI string like "Saved" or "apply a template" is one app's flavour).
     head = TEACH.split("## Filled example", 1)[0]
-    for banned in ("Metaview", "Wave", "GraphQL", "One Pager"):
+    for banned in ("Metaview", "Wave", "GraphQL", "One Pager", '"Saved"', "apply a template", "template applied"):
         assert banned not in head, f"reusable teach prompt leaked {banned!r}"
 
 def test_teach_prompt_carries_the_disciplines() -> None:

@@ -24,11 +24,11 @@ API-backed step.
 - Work the CHECKLIST in reverse-engineer-api's SKILL.md, box by box, in order. Paste each box's command
   output before ticking it. The gates decide the verdict — do not judge any value yourself.
 
-- CAPTURE THE WHOLE SEGMENT FROM A CLEAN STATE, with >=2 varied inputs (box 1). Start from a clean instance
-  (e.g. one with NO template applied yet). Do NOT do any setup before capture --start — if the UI does it
-  (open, apply a template, wait for "Saved", download), it must ALL be inside the capture. Run the entire
-  segment >=2 times with different inputs so the classifier can separate constants / inputs / computed
-  values. Keep each UI output as that run's golden.
+- CAPTURE THE WHOLE SEGMENT FROM A CLEAN STATE, with >=2 varied inputs (box 1). Start from a clean instance —
+  nothing done in advance. Do NOT do any setup before capture --start: whatever the UI does between the start
+  and the final result — open, any setup / select / generate steps, any "wait until it's ready" signal — must
+  ALL be inside the capture. Run the entire segment >=2 times with different inputs so the classifier can
+  separate constants / inputs / computed values. Keep each UI output as that run's golden.
 
 - You may NOT run teach_insert (box 8) until every gate has passed: box 3 not a bail, box 4
   unexplained==[], box 5 auth reproducible, box 7 MATCH on all held-out instances. KEEP UI on any

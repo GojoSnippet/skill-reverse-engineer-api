@@ -85,6 +85,18 @@ def custom_headers(sample: dict | None) -> dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in AUTO_HEADERS}
 
 
+def compact(obj: object, limit: int = 4000) -> object:
+    """Return the example as-is when small; otherwise a truncated-but-useful view so a giant response can't
+    bloat the output. Either way the agent sees the success field WITHOUT re-opening the raw capture."""
+    if obj is None:
+        return None
+    s = json.dumps(obj)
+    if len(s) <= limit:
+        return obj
+    return {"__truncated__": True, "preview": s[:limit] + " …",
+            "topLevelKeys": sorted(obj.keys()) if isinstance(obj, dict) else None}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
@@ -123,7 +135,12 @@ def main() -> None:
             # App-specific non-auto headers the fetch likely needs (CSRF, x-requested-with, ...).
             "customHeaders": custom_headers(sample),
             "requestExample": ep.get("requestExample"),  # redacted body template
-            "responseExampleKeys": sorted(resp_example.keys()) if isinstance(resp_example, dict) else None,
+            # FULL redacted response (nested) so the predicate's success field (e.g. data.x.pdfUrl) is
+            # visible WITHOUT re-opening the raw capture. The engine already inferred this; we used to drop
+            # it to top-level keys — which is exactly what forced the manual python-digging.
+            "responseExample": compact(resp_example),
+            "responseContentTypes": ep.get("responseContentTypes"),  # json vs binary -> predicate + dataBase64/url choice
+            "responseBodyKnown": ep.get("responseBodyKnown"),         # false -> body not captured -> can't derive a predicate -> keep UI
             "sampleCount": ep.get("sampleCount"),
             "statusCodes": ep.get("statusCodes") or [],
         })

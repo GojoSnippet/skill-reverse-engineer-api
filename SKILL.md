@@ -54,7 +54,8 @@ python scripts/analyze.py --run .o11y/run --match <url-substr-of-the-action>
 ```
 Pick the ONE candidate matching the action **from `analyze.py`'s printed output** (by `--match` and
 `operationName`). Note its `method`, `url`, `operationName`, `customHeaders`, `requestExample`,
-`observedAuthHeaders`, `responseExampleKeys`. **Do NOT open the raw `.o11y/` files or write python to
+`observedAuthHeaders`, and the **full `responseExample`** (the nested response — your success field is
+already in there, e.g. `data.x.pdfUrl`). **Do NOT open the raw `.o11y/` files or write python to
 inspect them — `analyze.py` already parsed everything.** If `--match` returns too many, narrow it; don't dig.
 
 ### 3. Bail check
@@ -84,7 +85,7 @@ Transcribe the candidate — do not hand-write:
 - the `<fetch>` copies the candidate's `method`, `url`, `requestContentType`, **every `customHeaders` key**,
   and the `requestExample` body — **parameterise only the step's inputs** as `{{var}}`. For case 2, set
   the auth header from the readable token (e.g. a cookie value); **never a literal token**.
-- the returned `ok` predicate is derived from `responseExampleKeys` — require the **real success fields the
+- the returned `ok` predicate is derived from the candidate's **`responseExample`** — require the **real success fields the
   captured response has** (e.g. `pdfUrl`) plus status. **Do not invent fields** (the `didSucceed` mistake).
 - **Binary output** — `run-in-page` writes `--out` from one of two fields you return; you do NOT need to
   read its source to learn this:

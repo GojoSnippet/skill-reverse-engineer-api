@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-# Tests for teach_insert.transform — the mechanical surgical insert. Runs with plain `python`.
+# Tests for teach_insert — the mechanical surgical insert + the verify-receipt gate. Runs with plain `python`.
+import io
+import json
+import os
 import sys
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 
 import teach_insert as t
 
@@ -72,6 +77,128 @@ def test_rejects_non_mission_step():
             pass
         else:
             raise AssertionError(f"expected rejection for: {bad!r}")
+
+
+# ---- the verify-receipt gate (check_receipt) ----
+# A receipt that PROVES the API equals the UI on a held-out instance (api_instance != golden_instance).
+GOOD_RECEIPT = {
+    "schema": "verify_receipt/v1",
+    "segment_id": "s0",
+    "verdict": "MATCH",
+    "api_instance": "run-in-page replay on held-out instance",
+    "golden_instance": "UI export on a different held-out instance",
+}
+
+
+def _receipt(**over: object) -> dict[str, object]:
+    return {**GOOD_RECEIPT, **over}
+
+
+def test_gate_accepts_valid_receipt():
+    t.check_receipt(_receipt())  # held-out, MATCH -> no raise
+
+
+def test_gate_rejects_mismatch_verdict():
+    try:
+        t.check_receipt(_receipt(verdict="MISMATCH"))
+    except t.GateError as e:
+        assert "MISMATCH" in str(e)
+    else:
+        raise AssertionError("expected GateError on a MISMATCH verdict")
+
+
+def test_gate_rejects_inconclusive_verdict():
+    try:
+        t.check_receipt(_receipt(verdict="INCONCLUSIVE"))
+    except t.GateError:
+        pass
+    else:
+        raise AssertionError("expected GateError on a non-MATCH verdict")
+
+
+def test_gate_rejects_same_instance():
+    same = "the very instance we built the chain on"
+    try:
+        t.check_receipt(_receipt(api_instance=same, golden_instance=same))
+    except t.GateError as e:
+        assert "api_instance" in str(e)
+    else:
+        raise AssertionError("expected GateError when api_instance == golden_instance")
+
+
+def test_gate_rejects_missing_instances():
+    try:
+        t.check_receipt({"verdict": "MATCH"})
+    except t.GateError:
+        pass
+    else:
+        raise AssertionError("expected GateError when held-out instances are absent")
+
+
+def test_gate_rejects_non_object_receipt():
+    try:
+        t.check_receipt(["not", "an", "object"])
+    except t.GateError:
+        pass
+    else:
+        raise AssertionError("expected GateError for a non-object receipt")
+
+
+# ---- main() wiring: the gate decides whether the file is written ----
+def _run_main(step_md: str, receipt: object | None, command: str = API) -> tuple[int, str]:
+    d = tempfile.mkdtemp()
+    step_path = os.path.join(d, "STEP.md")
+    cmd_path = os.path.join(d, "command.sh")
+    with open(step_path, "w") as f:
+        f.write(step_md)
+    with open(cmd_path, "w") as f:
+        f.write(command)
+    argv = ["--step", step_path, "--header", HEADER, "--command", cmd_path]
+    if receipt is not None:
+        verify_path = os.path.join(d, "verify_receipt.json")
+        with open(verify_path, "w") as f:
+            json.dump(receipt, f)
+        argv += ["--verify", verify_path]
+    err = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err):
+        code = t.main(argv)
+    with open(step_path) as f:
+        written = f.read()
+    return code, written
+
+
+def test_main_writes_on_proven_receipt():
+    code, written = _run_main(UI_ONLY, GOOD_RECEIPT)
+    assert code == 0, code
+    assert "## API attempt" in written  # the file WAS edited
+    assert "## UI instructions\n" + UI_STEPS in written  # UI still verbatim
+
+
+def test_main_refuses_and_leaves_file_untouched_on_mismatch():
+    code, written = _run_main(UI_ONLY, _receipt(verdict="MISMATCH"))
+    assert code != 0, "a MISMATCH receipt must NOT teach an API step"
+    assert written == UI_ONLY, "the step file must be left byte-for-byte unchanged on refusal"
+
+
+def test_main_refuses_on_same_instance():
+    same = "build-instance-only"
+    code, written = _run_main(UI_ONLY, _receipt(api_instance=same, golden_instance=same))
+    assert code != 0, "a same-instance proof must NOT teach an API step"
+    assert written == UI_ONLY
+
+
+def test_main_refuses_on_missing_receipt_file():
+    # --verify is required and must exist; a missing path is a clean refusal, not a crash.
+    d = tempfile.mkdtemp()
+    step_path = os.path.join(d, "STEP.md")
+    with open(step_path, "w") as f:
+        f.write(UI_ONLY)
+    err = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err):
+        code = t.main(["--step", step_path, "--header", HEADER, "--verify", os.path.join(d, "nope.json"), "--command", "/dev/null"])
+    assert code != 0
+    with open(step_path) as f:
+        assert f.read() == UI_ONLY
 
 
 if __name__ == "__main__":

@@ -7,8 +7,10 @@
 
   How to write good instructions:
   - ONE concrete action per numbered line (open / navigate / click X / type Y / wait for Z).
-  - Make the LAST data action (download / read / generate) unambiguous — that's the one teaching mode
-    turns into an API call.
+  - Describe the WHOLE data segment, including any SETUP — every state-changing action (apply a template,
+    wait for "Saved") AND the final action (download / read / generate). Teaching mode captures the ENTIRE
+    chain as one self-contained unit; it does NOT just API-ify the last action. Omitting setup here is the
+    documented root-cause bug — see the cautionary tale in docs/operator-playbook.md.
   - Keep it deterministic: name exact buttons/links, say what "done" looks like.
   - Inline login creds are fine for a test account (rotate after). They live ONLY in this step file.
 -->
@@ -25,9 +27,9 @@ Instructions:
 2. Navigate to `<app url>`. If you are not already logged in, log in at `<login url>` with:
    - email: `<email>`
    - password: `<password>`
-3. <concrete UI action>
-4. <concrete UI action>
-5. <the data action — download / read / generate — this is what gets API-ified>
+3. <concrete setup action — e.g. apply a template — this is part of the segment, not "prep">
+4. <wait for the done signal — e.g. "Saved" — name exactly what it looks like>
+5. <the final data action — download / read / generate>
 6. <if it produced a file, save it to `/agent/user-data/outputs/`>
 
 Return value:

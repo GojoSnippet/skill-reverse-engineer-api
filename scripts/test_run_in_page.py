@@ -173,6 +173,59 @@ def test_main_missing_var_is_usage():
     assert _run(["--contract", "1", "--port", str(UNUSED_PORT), "--js", "x={{nope}}", "--vars-json", "{}"]) == r.USAGE
 
 
+# ---- loop_budget_s / effective_timeout_s (long POLL/REPEAT/RETRY chains aren't cut short) ----
+# Canonical JS forms mirror references/chain-patterns.md.
+_POLL_JS = (
+    "const t0 = Date.now(); let status;"
+    'do { const rr = await fetch("/job/"+jobId); status = (await rr.json()).status;'
+    'if (status === "COMPLETE") break;'
+    "await new Promise(s => setTimeout(s, 2000)); } while (Date.now() - t0 < 60000);"
+)
+_REPEAT_JS = (
+    "const items = []; let cursor = null;"
+    'do { const rr = await fetch("/list?cursor="+(cursor ?? "")); const page = await rr.json();'
+    "items.push(...page.items); cursor = page.next_cursor; } while (cursor);"
+)
+_RETRY_JS = (
+    "let resp, attempt = 0;"
+    'do { resp = await fetch(actUrl, {method:"POST"});'
+    "if (![502,503,429].includes(resp.status)) break; } while (++attempt < 3);"
+)
+_ONESHOT_JS = 'const r = await fetch(u,{method:"GET"}); return { ok: r.ok };'
+
+def test_loop_budget_oneshot_is_zero():
+    # a plain one-shot fetch declares no loop bound -> 0 -> caller keeps its default --timeout
+    assert r.loop_budget_s(_ONESHOT_JS) == 0.0
+
+def test_loop_budget_poll_reads_declared_timeout():
+    # 60000ms loop bound is the dominant term; backoff is per-iteration, not an extra retry count
+    assert r.loop_budget_s(_POLL_JS) == 62.0  # 60s timeout + 2s backoff once
+
+def test_loop_budget_repeat_unbounded_marker_is_zero_timeout():
+    # a cursor loop with no Date.now() bound contributes no fixed timeout; budget stays 0 (no loop markers)
+    assert r.loop_budget_s(_REPEAT_JS) == 0.0
+
+def test_loop_budget_retry_multiplies_backoff_by_attempts():
+    js = _RETRY_JS + " await new Promise(s => setTimeout(s, 1000));"
+    assert r.loop_budget_s(js) == 3.0  # 1s backoff * 3 max_attempts, no Date.now() timeout
+
+def test_effective_timeout_raises_for_long_poll():
+    # default --timeout 30 must be raised to cover the 60s in-JS poll (+5s margin), else premature THREW
+    assert r.effective_timeout_s(30, _POLL_JS) == 67  # int(62) + 5
+
+def test_effective_timeout_never_shortens_caller_value():
+    # a generous explicit --timeout is preserved even when the loop budget is smaller
+    assert r.effective_timeout_s(300, _POLL_JS) == 300
+
+def test_effective_timeout_oneshot_keeps_default():
+    assert r.effective_timeout_s(30, _ONESHOT_JS) == 30
+
+def test_main_long_poll_passes_gate_with_raised_timeout():
+    # a long bounded READ poll still passes the read/write gate and reaches the (absent) browser -> THREW.
+    # cdp-wait 0 keeps the test fast; the point is the gate + timeout-floor path doesn't reject the loop.
+    assert _run(["--contract", "1", "--port", str(UNUSED_PORT), "--cdp-wait", "0", "--js", _POLL_JS]) == r.THREW
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -1,5 +1,10 @@
 # reverse-engineer-api — Test Plan & Observation Log
 
+> **INTERNAL — maintainers only.** This is the project's own validation suite and live-run log, not operator
+> or agent documentation. Operators use [`operator-playbook.md`](operator-playbook.md); the algorithm and
+> wire formats live in [`DESIGN.md`](DESIGN.md) and [`../CONTRACTS.md`](../CONTRACTS.md). Names/sessions/apps
+> mentioned below are concrete historical observations, not part of the generic method.
+
 The validation suite for the teaching-mode helper and the steps it generates. Two halves:
 **execution** (does a generated step run the API and fall back cleanly?) and **teaching** (does the
 helper correctly turn a UI step into an API step?). Update the **Observation log** after every live run.

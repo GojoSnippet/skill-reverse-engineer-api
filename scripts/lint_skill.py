@@ -15,6 +15,7 @@ import json  # noqa: F401  (kept for callers/tests that import json via this mod
 import os
 import re
 import sys
+from typing import Any
 
 from run_in_page import CONTRACT_VERSION, classify
 
@@ -45,7 +46,7 @@ class V:  # a violation
         return f"[{self.rule}] {self.where}: {self.msg}"
 
 
-def _parse_frontmatter(md: str) -> tuple[dict, str]:
+def _parse_frontmatter(md: str) -> tuple[dict[str, Any], str]:
     m = re.match(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", md, re.DOTALL)
     if not m:
         raise ValueError("missing YAML frontmatter")
@@ -128,7 +129,7 @@ def lint_skill(skill_dir: str) -> list[V]:
     return out
 
 
-def _lint_step(steps_dir: str, step: str, spec: dict) -> list[V]:
+def _lint_step(steps_dir: str, step: str, spec: dict[str, Any]) -> list[V]:
     out: list[V] = []
     step_md_p = os.path.join(steps_dir, f"{step}.md")
     if not os.path.exists(step_md_p):

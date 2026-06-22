@@ -12,13 +12,46 @@
 #   - Mission / Inputs / Important are untouched,
 #   - and NO other file is written (single-file by construction).
 #
-# Usage:  teach_insert.py --step steps/<STEP>.md --header "<provenance, no comment markers>" --api <file>
-#         (or pipe the API body on stdin and omit --api)
+# The write is GATED: it refuses unless a verify_receipt.json proves the API actually equals the UI on an
+# instance we did NOT build — a passing verdict AND a held-out instance distinct from the proof golden.
+# Without this, "a file was produced" would masquerade as "the API reproduces the UI" (the documented miss).
+#
+# Usage:  teach_insert.py --step steps/<STEP>.md --header "<provenance, no comment markers>"
+#                         --verify verify_receipt.json [--command <file>]
+#         (or pipe the API body on stdin and omit --command)
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+
+# verdict that proves content equivalence (matches verify_equivalence.py's vocabulary)
+PROVEN_VERDICT = "MATCH"
+
+
+class GateError(Exception):
+    pass
+
+
+def check_receipt(receipt: object) -> None:
+    # The two non-negotiables: the proof passed, and it was proved against a held-out instance — not the
+    # very instance we replayed (same-instance similarity is the shared-state false-pass G3 was built to kill).
+    if not isinstance(receipt, dict):
+        raise GateError("verify receipt is not a JSON object")
+    verdict = receipt.get("verdict")
+    if verdict != PROVEN_VERDICT:
+        raise GateError(
+            f"verify receipt verdict is {verdict!r}, refusing to teach — only {PROVEN_VERDICT!r} ships an API step"
+        )
+    api_instance = receipt.get("api_instance")
+    golden_instance = receipt.get("golden_instance")
+    if api_instance is None or golden_instance is None:
+        raise GateError("verify receipt missing api_instance/golden_instance — cannot prove a held-out instance")
+    if api_instance == golden_instance:
+        raise GateError(
+            "verify receipt api_instance == golden_instance — proof ran on the build instance, not a held-out one"
+        )
 
 
 def transform(step_md: str, header: str, command: str) -> str:
@@ -56,8 +89,21 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="teach_insert")
     ap.add_argument("--step", required=True, help="path to the mission-style UI-only steps/<STEP>.md")
     ap.add_argument("--header", required=True, help="provenance line WITHOUT the <!-- --> markers")
+    ap.add_argument("--verify", required=True, help="path to verify_receipt.json — the empirical proof gate")
     ap.add_argument("--command", default=None, help="file with the run-in-page command; omit to read stdin")
     args = ap.parse_args(argv)
+
+    try:
+        with open(args.verify) as f:
+            receipt = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: cannot read verify receipt {args.verify}: {exc}", file=sys.stderr)
+        return 3
+    try:
+        check_receipt(receipt)
+    except GateError as exc:
+        print(f"refusing to teach: {exc}", file=sys.stderr)
+        return 3
 
     with open(args.step) as f:
         step_md = f.read()

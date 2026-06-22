@@ -23,6 +23,10 @@
 # must already be OPEN and on the target origin (the step opens the app first). pick_target waits up to
 # --cdp-wait seconds for the browser/tab to be ready, so a just-launched/just-navigated browser is not a
 # hard failure (this is what made the first live run fail: the step ran before the browser existed).
+#
+# POLL/REPEAT/RETRY chains loop INSIDE the single JS (no second helper). A long-but-bounded readiness loop
+# can outlast --timeout, so the CDP/socket deadline is floored to the loop's OWN declared budget — the
+# loop runs to its predicate instead of a premature THREW. Canonical JS forms: references/chain-patterns.md.
 
 from __future__ import annotations
 
@@ -34,6 +38,9 @@ import re
 import sys
 import time
 import urllib.request
+from typing import Any
+
+JsonObj = dict[str, Any]  # a heterogeneous JSON-shaped record (vars / CDP target / evaluate result)
 
 CONTRACT_VERSION = 1
 
@@ -43,7 +50,7 @@ OK, FAIL, THREW, REFUSED_WRITE, BAD_CONTRACT, USAGE = 0, 1, 2, 3, 4, 5
 
 # ---- pure logic (unit-tested without a browser) ----------------------------
 
-def substitute_vars(js: str, vars_obj: dict) -> str:
+def substitute_vars(js: str, vars_obj: JsonObj) -> str:
     """Replace every ``{{key}}`` in ``js`` with the JSON-encoded value of ``vars_obj[key]``.
 
     JSON-encoding keeps substitution injection-safe (a string lands as ``"abc"``, a number as ``123``).
@@ -55,7 +62,13 @@ def substitute_vars(js: str, vars_obj: dict) -> str:
         raise ValueError(f"--vars-json is missing values for: {', '.join(missing)}")
     out = js
     for key in placeholders:
-        out = re.sub(r"\{\{\s*" + re.escape(key) + r"\s*\}\}", lambda _m, v=vars_obj[key]: json.dumps(v), out)
+        # a callable repl (not a string) so JSON backslashes/`\g` aren't read as re group refs
+        replacement = json.dumps(vars_obj[key])
+
+        def repl(_m: re.Match[str], r: str = replacement) -> str:  # r= binds this iteration's value
+            return r
+
+        out = re.sub(r"\{\{\s*" + re.escape(key) + r"\s*\}\}", repl, out)
     return out
 
 
@@ -89,7 +102,40 @@ def classify(js: str) -> str:
     return "read"
 
 
-def evaluate_outcome(result: object, out_path: str | None, out_exists_nonempty: bool) -> tuple[int, dict]:
+# A POLL/REPEAT/RETRY chain loops INSIDE the single JS (CONTRACTS §5.3): no second helper process. The
+# loop's own bound (a `Date.now()-t0 < <ms>` poll timeout, a `setTimeout(s,<ms>)` inter-poll backoff, or a
+# bounded RETRY) can outlast --timeout, so a legitimately-waiting readiness loop would be cut short as a
+# premature THREW. These regexes read the loop's declared budget out of the JS so the CDP/socket deadline
+# can be floored to cover it. They match the canonical authoring forms in references/chain-patterns.md.
+_LOOP_TIMEOUT_MS_RE = re.compile(r"Date\.now\(\)\s*-\s*\w+\s*<\s*(\d+)")  # POLL/REPEAT bound: `...< 60000`
+_BACKOFF_MS_RE = re.compile(r"setTimeout\(\s*\w+\s*,\s*(\d+)\s*\)")        # inter-poll/retry backoff
+_RETRY_ATTEMPTS_RE = re.compile(r"\+\+\w+\s*<\s*(\d+)")                    # bounded RETRY: `++attempt < 3`
+
+
+def loop_budget_s(js: str) -> float:
+    """Upper-bound the wall-clock a bounded in-JS POLL/REPEAT/RETRY chain may legitimately run, read from
+    the loop's OWN declared bounds. Generic: it sums the largest declared loop timeout(s) and adds the
+    backoff budget across the worst-case retry count, so a long-but-bounded readiness loop is never failed
+    early. Returns 0 for a plain one-shot fetch (no loop markers) — callers keep their default then."""
+    loop_ms = sum(int(m) for m in _LOOP_TIMEOUT_MS_RE.findall(js))
+    backoff_ms = max((int(m) for m in _BACKOFF_MS_RE.findall(js)), default=0)
+    attempts = max((int(m) for m in _RETRY_ATTEMPTS_RE.findall(js)), default=0)
+    # backoff happens once per loop iteration; a bounded RETRY adds backoff*attempts on top of any timeout.
+    total_ms = loop_ms + backoff_ms * max(attempts, 1 if backoff_ms else 0)
+    return total_ms / 1000.0
+
+
+def effective_timeout_s(arg_timeout: int, js: str) -> int:
+    """The CDP evaluate timeout to actually use: the larger of the caller's --timeout and the in-JS loop
+    budget plus a small margin. Never SHORTENS a caller's explicit timeout; only RAISES it so a long
+    bounded readiness chain runs to its own predicate rather than being killed mid-poll."""
+    budget = loop_budget_s(js)
+    if budget <= 0:
+        return arg_timeout
+    return max(arg_timeout, int(budget) + 5)  # +5s margin for the final post-loop fetch/return
+
+
+def evaluate_outcome(result: object, out_path: str | None, out_exists_nonempty: bool) -> tuple[int, JsonObj]:
     """Map the JS return value (+ whether --out got a non-empty file) to an exit code + a small report."""
     if not isinstance(result, dict):
         return FAIL, {"ok": False, "reason": "js did not return an object", "result": result}
@@ -110,7 +156,7 @@ def _origin(url: str) -> str:
     return m.group(0) if m else (url or "")
 
 
-def pick_target(port: int, match: str | None, wait_s: float = 15.0) -> dict:
+def pick_target(port: int, match: str | None, wait_s: float = 15.0) -> JsonObj:
     """Find the CDP page target to evaluate in, tolerating a browser that is still booting or a tab still
     navigating. Retries the debug endpoint until ``wait_s`` elapses; fails LOUD on an ambiguous match
     (terminal, no retry) or after the deadline. The wait is what stops a just-launched browser from being
@@ -119,7 +165,7 @@ def pick_target(port: int, match: str | None, wait_s: float = 15.0) -> dict:
     last = f"no CDP endpoint on :{port}"
     while True:
         try:
-            data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
+            data: list[JsonObj] = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
             pages = [t for t in data if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
             if match:
                 hits = [t for t in pages if match in (t.get("url") or "")]
@@ -142,7 +188,7 @@ def pick_target(port: int, match: str | None, wait_s: float = 15.0) -> dict:
         time.sleep(0.5)
 
 
-def evaluate_in_page(ws_url: str, js: str, timeout: int) -> dict:
+def evaluate_in_page(ws_url: str, js: str, timeout: int) -> JsonObj:
     # websocket-client exceptions are NOT OSError/TimeoutError subclasses — catch them here and re-raise
     # as standard types main() handles, so a handshake/send/recv failure (the TOCTOU cold-start window)
     # becomes a clean THREW with a reason line, never an uncaught traceback.
@@ -154,9 +200,10 @@ def evaluate_in_page(ws_url: str, js: str, timeout: int) -> dict:
         ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
             "expression": js, "awaitPromise": True, "returnByValue": True, "timeout": timeout * 1000}}))
         while True:
-            msg = json.loads(ws.recv())
+            msg: JsonObj = json.loads(ws.recv())
             if msg.get("id") == 2:
-                return msg.get("result", {})
+                result: JsonObj = msg.get("result", {})
+                return result
     except WebSocketTimeoutException as exc:
         raise TimeoutError("timed out waiting for the in-page evaluate result") from exc
     except WebSocketException as exc:
@@ -180,7 +227,7 @@ def looks_like_expected(out_path: str, data: bytes, content_type: str | None) ->
     return not (magic and not data.startswith(magic))
 
 
-def write_out(result: dict, out_path: str, timeout: int) -> bool:
+def write_out(result: JsonObj, out_path: str, timeout: int) -> bool:
     """Write binary output to --out. Prefer a download URL the helper fetches (no base64 through CDP);
     fall back to small inline dataBase64. Returns True only if a non-empty, type-correct file was written."""
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -238,16 +285,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "class": cls, "reason": "refusing a write/unclassified fetch without --allow-mutation"}))
         return REFUSED_WRITE
 
+    # A bounded POLL/REPEAT/RETRY chain may run longer than --timeout; floor the CDP deadline to its own
+    # declared budget so a long readiness loop runs to its predicate, never a premature THREW (§5.3).
+    timeout = effective_timeout_s(args.timeout, js)
     try:
         target = pick_target(args.port, args.match, args.cdp_wait)
-        raw = evaluate_in_page(target["webSocketDebuggerUrl"], js, args.timeout)
+        raw = evaluate_in_page(target["webSocketDebuggerUrl"], js, timeout)
     except (LookupError, TimeoutError, OSError) as exc:
         print(json.dumps({"ok": False, "reason": str(exc)}))
         return THREW
 
     if raw.get("exceptionDetails"):
-        exc = raw["exceptionDetails"]
-        detail = exc.get("exception", {}).get("description") or exc.get("text") or "js exception"
+        details = raw["exceptionDetails"]
+        detail = details.get("exception", {}).get("description") or details.get("text") or "js exception"
         print(json.dumps({"ok": False, "reason": detail}))
         return THREW
 
@@ -255,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     out_ok = True
     if args.out is not None:
         try:
-            out_ok = write_out(result if isinstance(result, dict) else {}, args.out, args.timeout)
+            out_ok = write_out(result if isinstance(result, dict) else {}, args.out, timeout)
         except OSError as exc:
             print(json.dumps({"ok": False, "reason": f"output write failed: {exc}"}))
             return FAIL

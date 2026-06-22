@@ -13,6 +13,9 @@ import json
 import os
 import re
 import sys
+from typing import Any
+
+JsonObj = dict[str, Any]  # a heterogeneous JSON-shaped record (paired row)
 
 SIGNING_KEY_RE = re.compile(r"(sign|signature|hmac|nonce|_sig|x-sig|checksum|digest)", re.I)
 CAPTCHA_KEY_RE = re.compile(r"(recaptcha|g-recaptcha-response|h-captcha|cf-turnstile|captcha)", re.I)
@@ -20,7 +23,7 @@ HIGH_ENTROPY_RE = re.compile(r"^[A-Za-z0-9+/_-]{32,}=*$")
 ANTIBOT_HEADER_RE = re.compile(r"(cf-mitigated|cf-chl|x-datadome|akamai|perimeterx|x-px|incap)", re.I)
 
 
-def load_paired(run: str) -> list[dict]:
+def load_paired(run: str) -> list[JsonObj]:
     path = os.path.join(run, "api-spec", "intermediate", "paired.jsonl")
     if not os.path.exists(path):
         sys.exit(f"no paired trace at {path}; run discover.mjs first")
@@ -28,7 +31,7 @@ def load_paired(run: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def pick_submit(rows: list[dict], match: str | None) -> dict | None:
+def pick_submit(rows: list[JsonObj], match: str | None) -> JsonObj | None:
     cands = [r for r in rows if r.get("method") in ("POST", "PUT", "PATCH", "DELETE")]
     if match:
         cands = [r for r in cands if match in r.get("url", "")]
@@ -36,7 +39,7 @@ def pick_submit(rows: list[dict], match: str | None) -> dict | None:
     return cands[0] if cands else None
 
 
-def _walk_kv(obj, out: list[tuple[str, str]]) -> None:
+def _walk_kv(obj: Any, out: list[tuple[str, str]]) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
             if isinstance(v, (dict, list)):

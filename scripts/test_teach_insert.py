@@ -80,13 +80,16 @@ def test_rejects_non_mission_step():
 
 
 # ---- the verify-receipt gate (check_receipt) ----
-# A receipt that PROVES the API equals the UI on a held-out instance (api_instance != golden_instance).
+# The REAL prove_runner receipt shape: top-level verdict PROVEN (per-comparison "MATCH" is nested), and
+# coverage.fresh_not_build_instance proving it ran on a held-out instance. (A receipt with verdict "MATCH"
+# is the bug the review caught — no producer writes that at top level, so it must NOT be accepted.)
 GOOD_RECEIPT = {
     "schema": "verify_receipt/v1",
     "segment_id": "s0",
-    "verdict": "MATCH",
-    "api_instance": "run-in-page replay on held-out instance",
-    "golden_instance": "UI export on a different held-out instance",
+    "verdict": "PROVEN",
+    "proof_instances": ["rep_fresh01", "rep_big01"],
+    "build_instance": "cap_build",
+    "coverage": {"fresh_not_build_instance": True, "mutually_isolated": True},
 }
 
 
@@ -95,44 +98,54 @@ def _receipt(**over: object) -> dict[str, object]:
 
 
 def test_gate_accepts_valid_receipt():
-    t.check_receipt(_receipt())  # held-out, MATCH -> no raise
+    t.check_receipt(_receipt())  # PROVEN + held-out -> no raise
 
 
-def test_gate_rejects_mismatch_verdict():
+def test_gate_rejects_match_verdict():
+    # regression: "MATCH" is the nested per-comparison verdict, never the top-level — must be rejected.
     try:
-        t.check_receipt(_receipt(verdict="MISMATCH"))
+        t.check_receipt(_receipt(verdict="MATCH"))
     except t.GateError as e:
-        assert "MISMATCH" in str(e)
+        assert "MATCH" in str(e) and "PROVEN" in str(e)
     else:
-        raise AssertionError("expected GateError on a MISMATCH verdict")
+        raise AssertionError("expected GateError: top-level verdict 'MATCH' must not ship")
 
 
-def test_gate_rejects_inconclusive_verdict():
+def test_gate_rejects_failed_verdict():
     try:
-        t.check_receipt(_receipt(verdict="INCONCLUSIVE"))
+        t.check_receipt(_receipt(verdict="FAILED"))
     except t.GateError:
         pass
     else:
-        raise AssertionError("expected GateError on a non-MATCH verdict")
+        raise AssertionError("expected GateError on a FAILED verdict")
 
 
-def test_gate_rejects_same_instance():
-    same = "the very instance we built the chain on"
+def test_gate_rejects_uncovered_verdict():
     try:
-        t.check_receipt(_receipt(api_instance=same, golden_instance=same))
-    except t.GateError as e:
-        assert "api_instance" in str(e)
-    else:
-        raise AssertionError("expected GateError when api_instance == golden_instance")
-
-
-def test_gate_rejects_missing_instances():
-    try:
-        t.check_receipt({"verdict": "MATCH"})
+        t.check_receipt(_receipt(verdict="UNCOVERED"))
     except t.GateError:
         pass
     else:
-        raise AssertionError("expected GateError when held-out instances are absent")
+        raise AssertionError("expected GateError on an UNCOVERED verdict")
+
+
+def test_gate_rejects_build_instance_proof():
+    # regression: a proof on the build instance (fresh_not_build_instance false) must be rejected.
+    try:
+        t.check_receipt(_receipt(coverage={"fresh_not_build_instance": False}))
+    except t.GateError as e:
+        assert "fresh_not_build_instance" in str(e)
+    else:
+        raise AssertionError("expected GateError when the proof ran on the build instance")
+
+
+def test_gate_rejects_missing_coverage():
+    try:
+        t.check_receipt({"verdict": "PROVEN"})
+    except t.GateError:
+        pass
+    else:
+        raise AssertionError("expected GateError when the coverage block is absent")
 
 
 def test_gate_rejects_non_object_receipt():
@@ -180,10 +193,9 @@ def test_main_refuses_and_leaves_file_untouched_on_mismatch():
     assert written == UI_ONLY, "the step file must be left byte-for-byte unchanged on refusal"
 
 
-def test_main_refuses_on_same_instance():
-    same = "build-instance-only"
-    code, written = _run_main(UI_ONLY, _receipt(api_instance=same, golden_instance=same))
-    assert code != 0, "a same-instance proof must NOT teach an API step"
+def test_main_refuses_on_build_instance():
+    code, written = _run_main(UI_ONLY, _receipt(coverage={"fresh_not_build_instance": False}))
+    assert code != 0, "a build-instance proof must NOT teach an API step"
     assert written == UI_ONLY
 
 

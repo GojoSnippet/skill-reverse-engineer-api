@@ -105,6 +105,38 @@ def test_shell_sleep_fails() -> None:
     assert any(w["kind"] == "sleep" for w in r["fixed_waits"])
 
 
+def test_hash_in_double_quoted_string_does_not_hide_wait() -> None:
+    # regression: a '#' inside a double-quoted JS string (a CSS selector) must not be treated as a shell
+    # comment that deletes the rest of the line — which would hide the following fixed setTimeout.
+    src = r"""run-in-page --contract 1 --allow-mutation --js '(async () => {
+  document.querySelector("#submit-btn"); await new Promise(s => setTimeout(s, 8000));
+  const pdf = await fetch("/job/pdf", {credentials:"include"}); return { ok: pdf.ok };
+})()'"""
+    r = c.evaluate(src, None)
+    assert r["verdict"] == "FAIL", r
+    assert r["fixed_waits"] and r["fixed_waits"][0]["delay"] == "8000"
+
+
+def test_subshell_sleep_is_detected() -> None:
+    # regression: a fixed wait inside a subshell `(sleep 8)` must still be caught.
+    src = 'curl /apply -X POST\n(sleep 8)\ncurl "/job/pdf" -o "$PROVE_OUT"\n'
+    r = c.evaluate(src, None)
+    assert r["verdict"] == "FAIL", r
+    assert any(w["kind"] == "sleep" and w["delay"] == "8" for w in r["fixed_waits"])
+
+
+def test_settimeout_with_comma_in_callback_is_detected() -> None:
+    # regression: a callback containing commas must not let the fixed delay evade, and an internal numeric
+    # arg must not be mistaken for it (only the LAST top-level arg counts).
+    src = r"""run-in-page --contract 1 --allow-mutation --js '(async () => {
+  setTimeout(() => poll(a, b), 8000);
+  const pdf = await fetch("/job/pdf", {credentials:"include"}); return { ok: pdf.ok };
+})()'"""
+    r = c.evaluate(src, None)
+    assert r["verdict"] == "FAIL", r
+    assert any(w["delay"] == "8000" for w in r["fixed_waits"])
+
+
 def test_promise_delay_outside_loop_fails() -> None:
     src = 'await new Promise(r => setTimeout(r, 5000)); await fetch("/act");'
     r = c.evaluate(src, None)

@@ -99,6 +99,17 @@ def test_is_mutation_get_is_read():
     assert c.is_mutation(_row("1", "GET", "/job/abc")) is False
 
 
+def test_is_mutation_lowercase_method_is_write():
+    # regression: some capture tools emit a lowercase method; "post" must still be a mutation.
+    assert c.is_mutation(_row("1", "post", "/jobs", req={"name": "x"})) is True
+
+
+def test_is_mutation_query_named_mutation_is_not_write():
+    # regression: a read whose op name merely CONTAINS "mutation" must not be flagged a write (anchored).
+    row = _row("1", "POST", "/graphql", req={"query": "query GetMutationStatus { status }"})
+    assert c.is_mutation(row) is False
+
+
 def test_request_carriers_flattens_body_query_headers():
     row = _row("1", "POST", "/x", req={"variables": {"id": "abc"}}, req_headers={"x-csrf-token": "tok"})
     cs = dict(c.request_carriers(row))
@@ -397,8 +408,39 @@ def test_poll_inserted_for_repeated_status_read():
     poll = plan["control_flow"]["polls"][0]
     assert poll["predicate"]["over"] == "body-field"
     assert poll["predicate"]["path"] == "json-ptr:/status"
+    # regression: the predicate must wait for the TERMINAL status (COMPLETE), not the first (RUNNING) — else
+    # the poll exits immediately and fetches the artifact prematurely (the Metaview async bug).
+    assert poll["predicate"]["equals"] == "COMPLETE", poll["predicate"]["equals"]
     assert any(s["op"] == "POLL" for s in plan["steps"])
     assert plan["gate"]["G2_no_fixed_wait"]["pass"] is True
+
+
+def test_low_entropy_input_is_classified_not_unexplained():
+    # regression: a SHORT id (42 -> 97) that co-varies with the declared input is INPUT, not UNEXPLAINED
+    # (the INPUT bucket must not be entropy-gated — co-variation with a KNOWN input is the evidence).
+    def runset(label: str, inv: str) -> tuple[list[dict], dict]:
+        rows = [_row("e0", "POST", "/export", req={"invoiceId": inv}, resp={"ok": True}, rctype="application/pdf")]
+        return rows, _inputs(label, [_binding("rInv", inv)])
+    rows1, in1 = runset("run1", "42")
+    rows2, in2 = runset("run2", "97")
+    plan = _build(rows1, in1, rows2, in2)
+    v = _value_for(plan, "/invoiceId")
+    assert v is not None and v["bucket"] == "INPUT", v
+
+
+def test_golden_source_single_not_assembled_for_common_ctype():
+    # regression: a common content-type (json) matching MANY responses must NOT become 'assembled' — pick
+    # the terminal single source, or R over-selects into a false PROVEN.
+    root = tempfile.mkdtemp()
+    try:
+        rows = [_row("a", "GET", "/a", resp={"x": 1}), _row("b", "GET", "/b", resp={"y": 2}),
+                _row("z", "POST", "/export", resp={"z": 3})]
+        rd = _write_run(root, "run", rows, _inputs("run", [], golden_tag="json"))
+        gs = c.find_golden_source(c.Run(rd))
+        assert gs["mode"] == "single", gs["mode"]
+        assert gs["exchange_seqs"] == [2], gs["exchange_seqs"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_repeat_inserted_for_pagination_signal():

@@ -26,8 +26,8 @@ import argparse
 import json
 import sys
 
-# verdict that proves content equivalence (matches verify_equivalence.py's vocabulary)
-PROVEN_VERDICT = "MATCH"
+# the top-level verdict prove_runner writes when the G3 proof passes (per-comparison "MATCH" is nested)
+PROVEN_VERDICT = "PROVEN"
 
 
 class GateError(Exception):
@@ -44,13 +44,13 @@ def check_receipt(receipt: object) -> None:
         raise GateError(
             f"verify receipt verdict is {verdict!r}, refusing to teach — only {PROVEN_VERDICT!r} ships an API step"
         )
-    api_instance = receipt.get("api_instance")
-    golden_instance = receipt.get("golden_instance")
-    if api_instance is None or golden_instance is None:
-        raise GateError("verify receipt missing api_instance/golden_instance — cannot prove a held-out instance")
-    if api_instance == golden_instance:
+    coverage = receipt.get("coverage")
+    if not isinstance(coverage, dict):
+        raise GateError("verify receipt missing coverage block — cannot confirm a held-out instance")
+    if coverage.get("fresh_not_build_instance") is not True:
         raise GateError(
-            "verify receipt api_instance == golden_instance — proof ran on the build instance, not a held-out one"
+            "verify receipt coverage.fresh_not_build_instance is not true — the proof ran on the build "
+            "instance, not a held-out one (the shared-state false-pass G3 exists to kill)"
         )
 
 

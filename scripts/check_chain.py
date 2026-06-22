@@ -18,12 +18,13 @@ import json
 import re
 import sys
 
-# A numeric-literal delay primitive: `setTimeout(fn, 8000)`, `sleep 8`, `await sleep(8000)`,
-# `new Promise(r => setTimeout(r, 8000))`. The literal is what makes it a FIXED wait (vs `setTimeout(fn, interval)`).
-SET_TIMEOUT_RE = re.compile(r"setTimeout\s*\(\s*[^,]*?,\s*(\d+)\s*\)")
-PROMISE_DELAY_RE = re.compile(r"new\s+Promise\s*\(\s*\w+\s*=>\s*setTimeout\s*\(\s*\w+\s*,\s*(\d+)\s*\)")
+# setTimeout fixed delays are detected paren-aware (see _settimeout_waits) — a regex `[^,]*?` can't span a
+# comma inside the callback (`setTimeout(() => poll(a,b), 8000)`) and would also mis-read an internal numeric
+# arg (`bar(3,4)`). Only the LAST top-level argument being a numeric literal is a FIXED wait.
+_SETTIMEOUT_OPEN_RE = re.compile(r"setTimeout\s*\(")
+_NUMERIC_RE = re.compile(r"\s*\d+(?:\.\d+)?\s*")
 # A shell `sleep` (readiness wait in a bash chain): `sleep 8`, `sleep 0.5`, `sleep "$X"` is NOT numeric.
-SHELL_SLEEP_RE = re.compile(r"(?:^|[\n;&|]|\b(?:then|do|else)\b)\s*sleep\s+(\d+(?:\.\d+)?)\b", re.M)
+SHELL_SLEEP_RE = re.compile(r"(?:^|[\n;&|(]|\b(?:then|do|else)\b)\s*sleep\s+(\d+(?:\.\d+)?)\b", re.M)
 
 # A readiness predicate inside a loop: something the loop re-tests until it holds. These mirror the POLL
 # authoring form (CONTRACTS §5.3) — a status/field/code/presence comparison driving the loop's exit.
@@ -71,11 +72,21 @@ def strip_noise(src: str) -> str:
     wrappers = _wrapper_spans(src)
     out: list[str] = []
     i, n = 0, len(src)
-    quote: str | None = None
+    quote: str | None = None  # "'" = JS data string (collapse body); '"' or "`" = string (keep, no comments)
     while i < n:
         c = src[i]
-        if quote:
+        if quote == "'":  # JS single-quoted DATA string -> collapse its body to spaces
             if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote in ('"', "`"):  # double-quote / template literal -> KEEP body, but a # or // inside is data
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
                 i += 2
                 continue
             if c == quote:
@@ -91,7 +102,7 @@ def strip_noise(src: str) -> str:
             j = src.find("*/", i + 2)
             i = n if j < 0 else j + 2
             continue
-        if c == "#":  # shell comment
+        if c == "#" and (i == 0 or src[i - 1] in " \t\n;&|("):  # shell comment only at a word boundary
             j = src.find("\n", i)
             i = n if j < 0 else j
             continue
@@ -100,8 +111,13 @@ def strip_noise(src: str) -> str:
             i += 1
             continue
         if c == "'":  # a JS data string -> collapse its body
-            quote = c
+            quote = "'"
             out.append(" ")
+            i += 1
+            continue
+        if c in ('"', "`"):  # a kept string — comments inside it are not comments
+            quote = c
+            out.append(c)
             i += 1
             continue
         out.append(c)
@@ -142,21 +158,55 @@ def _in_any_span(pos: int, spans: list[tuple[int, int]]) -> tuple[int, int] | No
     return None
 
 
+def _call_args(src: str, open_paren: int) -> list[str] | None:
+    # split a call's args by TOP-LEVEL commas, paren/brace/bracket aware. src[open_paren] must be '('.
+    # None if the call is unbalanced. (Also covers `new Promise(r => setTimeout(r, 8000))` via the inner call.)
+    depth = 0
+    args: list[str] = []
+    cur: list[str] = []
+    for i in range(open_paren, len(src)):
+        c = src[i]
+        if c in "([{":
+            depth += 1
+            if depth > 1:
+                cur.append(c)
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(cur))
+                return args
+            cur.append(c)
+        elif c == "," and depth == 1:
+            args.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+    return None
+
+
+def _settimeout_waits(src: str) -> list[tuple[int, str]]:
+    # setTimeout calls whose LAST top-level argument is a numeric literal — a FIXED delay (vs a variable
+    # interval). Paren-aware, so a comma in the callback can't hide it and an internal numeric arg can't fake it.
+    out: list[tuple[int, str]] = []
+    for m in _SETTIMEOUT_OPEN_RE.finditer(src):
+        args = _call_args(src, m.end() - 1)
+        if args and _NUMERIC_RE.fullmatch(args[-1]):
+            out.append((m.start(), args[-1].strip()))
+    return out
+
+
 # A numeric delay is a FIXED READINESS WAIT iff it is NOT inside a loop body that also carries a
 # readiness predicate. Inside such a loop it is the legal inter-poll backoff (CONTRACTS §5.3).
-# A Promise-wrapped setTimeout matches both patterns; report it once (promise-delay wins, it's specific).
 def fixed_waits(src: str) -> list[dict[str, object]]:
     spans = loop_body_spans(src)
-    promise_spans: list[tuple[int, int]] = [m.span() for m in PROMISE_DELAY_RE.finditer(src)]
     hits: list[dict[str, object]] = []
-    for kind, rx in (("promise-delay", PROMISE_DELAY_RE), ("setTimeout", SET_TIMEOUT_RE), ("sleep", SHELL_SLEEP_RE)):
-        for m in rx.finditer(src):
-            if kind == "setTimeout" and any(a <= m.start() <= b for a, b in promise_spans):
-                continue  # the enclosing promise-delay already reported this physical wait
-            span = _in_any_span(m.start(), spans)
-            backoff = span is not None and PREDICATE_RE.search(src[span[0] : span[1]]) is not None
-            if not backoff:
-                hits.append({"kind": kind, "delay": m.group(1), "pos": m.start(), "readiness": True})
+    raw: list[tuple[str, int, str]] = [("setTimeout", pos, delay) for pos, delay in _settimeout_waits(src)]
+    raw += [("sleep", m.start(), m.group(1)) for m in SHELL_SLEEP_RE.finditer(src)]
+    for kind, pos, delay in raw:
+        span = _in_any_span(pos, spans)
+        backoff = span is not None and PREDICATE_RE.search(src[span[0] : span[1]]) is not None
+        if not backoff:
+            hits.append({"kind": kind, "delay": delay, "pos": pos, "readiness": True})
     return hits
 
 

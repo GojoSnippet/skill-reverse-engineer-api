@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter
 from typing import Any
@@ -100,6 +101,26 @@ def request_carriers(row: JsonObj) -> list[tuple[str, object]]:
     for k, v in (row.get("reqHeaders") or {}).items():
         carriers.append((f"header:{k.lower()}", v))
     return carriers
+
+
+def _stable_key(row: JsonObj) -> str:
+    # A cross-run-stable identity for a request: method + id-normalized path + GraphQL operationName. Lets us
+    # align the SAME logical request across runs whose R differs in length (an extra CSRF GET shifts ranks).
+    method = (row.get("method") or "").upper()
+    raw = str(row.get("path") or row.get("url") or "")
+    norm = "/".join("{}" if is_high_entropy(s) else s for s in raw.split("?", 1)[0].split("/"))
+    op = ""
+    body = row.get("reqBody")
+    if isinstance(body, dict) and isinstance(body.get("operationName"), str):
+        op = body["operationName"]
+    return f"{method} {norm} {op}"
+
+
+def _carrier_value(row: JsonObj, extractor: str) -> object | None:
+    for ext, val in request_carriers(row):
+        if ext == extractor:
+            return val
+    return None
 
 
 def response_sources(row: JsonObj) -> list[tuple[str, object]]:
@@ -187,11 +208,12 @@ def _load_inputs(run_dir: str) -> JsonObj:
 
 
 def is_mutation(row: JsonObj) -> bool:
-    if row.get("method") in MUTATING_METHODS:
+    # method case-insensitive (some capture tools emit "post"); GraphQL detection ANCHORED — a read named
+    # "query GetMutationStatus {...}" merely CONTAINS "mutation" and must not be flagged a write.
+    if (row.get("method") or "").upper() in MUTATING_METHODS:
         body = row.get("reqBody")
-        # a POST carrying a GraphQL query (not a mutation) is a read despite the verb
         if isinstance(body, dict) and isinstance(body.get("query"), str):
-            return "mutation" in body["query"].lower().split("{", 1)[0]
+            return re.match(r"\s*mutation\b", body["query"], re.IGNORECASE) is not None
         return True
     return False
 
@@ -204,18 +226,15 @@ def find_golden_source(run: Run) -> JsonObj:
     # sha256/bytes/produces_ref when present, else on a tagged binary content-type. found:false => BAIL-1.
     golden = run.golden
     tag = golden.get("tag")
-    seqs: list[int] = []
+    matches: list[int] = []
     for i, row in enumerate(run.rows):
         ctype = (row.get("respHeaders") or {}).get("content-type", "") or row.get("contentType", "") or ""
         ct = ctype.lower()
-        body = row.get("respBody")
-        # binary/opaque artifact (pdf/zip/image/csv) -> whole-payload source
         if tag and (tag in ct or _ctype_matches_tag(ct, tag)):
-            seqs.append(i)
-        elif isinstance(body, str) and tag and tag in ct:
-            seqs.append(i)
-    if not seqs:
+            matches.append(i)
+    if not matches:
         return {"found": False, "mode": "single", "exchange_seqs": [], "extractor": None, "comparator_hint": None}
+    seqs = _resolve_golden_seqs(run, golden, matches)
     mode = "assembled" if len(seqs) > 1 else "single"
     return {
         "found": True,
@@ -224,6 +243,22 @@ def find_golden_source(run: Run) -> JsonObj:
         "extractor": "whole-payload",
         "comparator_hint": "assembled" if mode == "assembled" else "binary-projection",
     }
+
+
+def _resolve_golden_seqs(run: Run, golden: JsonObj, matches: list[int]) -> list[int]:
+    # A common content-type (e.g. json) matches MANY responses — multiplicity is NOT evidence of an assembled
+    # (streamed/paginated) golden. Pin to the producing exchange via produces_ref when the trace carries it,
+    # else take the TERMINAL match (the final export is the source in the common case). A single terminal
+    # source errs toward keep-UI; auto-'assembled' over-selects R into a false PROVEN. (sha256/byte matching is
+    # unavailable here — the trace stores parsed bodies, not the raw artifact.)
+    if len(matches) == 1:
+        return matches
+    ref = golden.get("produces_ref")
+    if ref:
+        pinned = [i for i in matches if run.rows[i].get("produces_ref") == ref or run.rows[i].get("ref") == ref]
+        if pinned:
+            return pinned
+    return [matches[-1]]
 
 
 def _ctype_matches_tag(ct: str, tag: str) -> bool:
@@ -269,21 +304,20 @@ class Classifier:
         labels = {r.label for r in self.runs}
         return len(labels) >= 2
 
+    def _seq_by_key(self, run: Run, key: str) -> int | None:
+        for seq in transitive_subset(run, find_golden_source(run)["exchange_seqs"]):
+            if _stable_key(run.rows[seq]) == key:
+                return seq
+        return None
+
     def _value_across_runs(self, rank: int, extractor: str) -> list[object | None]:
-        # the value at the same carrier (same R-rank request, same extractor) in each run.
+        # Align by a STABLE request key, NOT R-rank: each run's R is recomputed independently, so an
+        # extra/missing call (e.g. a CSRF GET) shifts ranks and would compare unrelated requests.
+        key = _stable_key(self.primary.rows[self.r_seqs[rank]])
         out: list[object | None] = []
         for run in self.runs:
-            r_seqs = transitive_subset(run, find_golden_source(run)["exchange_seqs"])
-            if rank >= len(r_seqs):
-                out.append(None)
-                continue
-            row = run.rows[r_seqs[rank]]
-            found: object | None = None
-            for ext, val in request_carriers(row):
-                if ext == extractor:
-                    found = val
-                    break
-            out.append(found)
+            seq = self._seq_by_key(run, key)
+            out.append(_carrier_value(run.rows[seq], extractor) if seq is not None else None)
         return out
 
     def _source_in_responses(self, run: Run, r_seqs: list[int], up_to_rank: int, val: object) -> tuple[int, str] | None:
@@ -308,10 +342,13 @@ class Classifier:
         matches: list[str] = []
         info: JsonObj = {"node": node, "carrier": extractor}
 
-        # INPUT — equals a segment input in EVERY run, co-varying across the >=2 varied inputs.
+        # INPUT — equals a declared segment input in EVERY run, co-varying across the >=2 varied inputs.
+        # NOT entropy-gated: the evidence is co-variation with a KNOWN declared input (entropy guards DERIVED
+        # against coincidental response matches, but a short id/page-number/enum that tracks the input IS the
+        # input — e.g. invoiceId 42 -> 97). Without this, every low-entropy input is a false UNEXPLAINED.
         input_ref = self._input_match(val)
         co_varies = self._co_varies_with_input(rank, extractor, across)
-        if input_ref and high_entropy and co_varies and runs_confirmed >= 2:
+        if input_ref and co_varies and runs_confirmed >= 2:
             matches.append("INPUT")
             info["_input"] = {"ref": input_ref, "co_varies": True}
 
@@ -426,18 +463,19 @@ class Classifier:
     def _derived_confirmed(self, rank: int, extractor: str, src: tuple[int, str]) -> bool:
         # the same response->request edge holds in EVERY run (same src rank exposes the request's value).
         src_rank, src_ext = src
+        # Align consumer AND source by stable key in every run (R is recomputed per run; positional ranks
+        # drift when a run has an extra/missing call).
+        cons_key = _stable_key(self.primary.rows[self.r_seqs[rank]])
+        src_key = _stable_key(self.primary.rows[self.r_seqs[src_rank]])
         for run in self.runs:
-            r_seqs = transitive_subset(run, find_golden_source(run)["exchange_seqs"])
-            if rank >= len(r_seqs) or src_rank >= len(r_seqs) or src_rank >= rank:
+            cons_seq = self._seq_by_key(run, cons_key)
+            src_seq = self._seq_by_key(run, src_key)
+            if cons_seq is None or src_seq is None:
                 return False
-            req_val: object | None = None
-            for ext, val in request_carriers(run.rows[r_seqs[rank]]):
-                if ext == extractor:
-                    req_val = val
-                    break
+            req_val = _carrier_value(run.rows[cons_seq], extractor)
             if req_val is None:
                 return False
-            resp_vals = {canon(v) for e, v in response_sources(run.rows[r_seqs[src_rank]]) if e == src_ext}
+            resp_vals = {canon(v) for e, v in response_sources(run.rows[src_seq]) if e == src_ext}
             if canon(req_val) not in resp_vals:
                 return False
         return True
@@ -473,9 +511,13 @@ def build_control_flow(run: Run, r_seqs: list[int], node_of_seq: dict[int, str])
         if locator_counts[loc] >= 2 and not is_mutation(row) and loc not in seen:
             status_path = _status_field(row)
             if status_path:
+                # Read the ready value from the TERMINAL occurrence (COMPLETE), NOT the first (RUNNING) — else
+                # the generated poll is satisfied immediately and fetches the artifact prematurely.
+                terminal_row = _last_row_for_locator(run, r_seqs, loc)
                 polls.append({
                     "read": node_of_seq[seq],
-                    "predicate": {"over": "body-field", "path": status_path, "equals": _terminal_status(row, status_path),
+                    "predicate": {"over": "body-field", "path": status_path,
+                                  "equals": _terminal_status(terminal_row, status_path),
                                   "timeout_s": 60, "interval_s": 2},
                 })
                 seen.add(loc)
@@ -491,6 +533,13 @@ def _locator(row: JsonObj) -> str:
     op = (row.get("reqBody") or {}).get("operationName") if isinstance(row.get("reqBody"), dict) else None
     base = (row.get("origin") or "") + (row.get("path") or "")
     return f"{base}[{op}]" if op else base
+
+
+def _last_row_for_locator(run: Run, r_seqs: list[int], loc: str) -> JsonObj:
+    for seq in reversed(r_seqs):
+        if _locator(run.rows[seq]) == loc:
+            return run.rows[seq]
+    return run.rows[r_seqs[0]]
 
 
 def _status_field(row: JsonObj) -> str | None:
@@ -695,7 +744,9 @@ def _g2_check(control_flow: JsonObj, run: Run, r_seqs: list[int]) -> bool:
     needed_polls = {loc for loc, n in locator_counts.items() if n >= 2}
     have_polls = {_locator(run.rows[seq]) for seq in r_seqs
                   for p in control_flow["polls"] if p["read"] == f"n{r_seqs.index(seq)}"}
-    if needed_polls and not (needed_polls & have_polls):
+    # EVERY repeated-read gap needs a POLL — subset, not intersection (intersection passes when only ONE of
+    # several async gaps is covered, shipping a chain that races on the uncovered one).
+    if not needed_polls.issubset(have_polls):
         return False
     for seq in r_seqs:
         if _continuation_signal(run.rows[seq]) and not control_flow["repeats"]:

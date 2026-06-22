@@ -2,6 +2,7 @@
 # Tests for prove_runner.py — the S6/G3 PROVEN gate. Runs with plain `python3` (no pytest, no browser).
 # The actual API run + UI golden are injected via a FakeRunner; the comparator block is injected by
 # monkeypatching the module-level _verify_equivalence, so nothing here shells out or touches a live page.
+import json
 import sys
 from typing import Any
 
@@ -11,10 +12,13 @@ import prove_runner as p
 
 
 class FakeRunner:
-    # Returns deterministic artifact paths; `missing_*` ids simulate a run that produced no output.
-    def __init__(self, missing_api: set[str] | None = None, missing_golden: set[str] | None = None) -> None:
+    # api path is fake (the comparison is monkeypatched); the golden is written as REAL JSON so the G3.5
+    # mask-validity check can load it. `vary_mask` makes the masked field differ per instance -> invalid mask.
+    def __init__(self, missing_api: set[str] | None = None, missing_golden: set[str] | None = None,
+                 vary_mask: bool = False) -> None:
         self._missing_api = missing_api or set()
         self._missing_golden = missing_golden or set()
+        self._vary_mask = vary_mask
 
     def run_api(self, command: str, instance: "p.Instance", run: int) -> str | None:
         if instance.id in self._missing_api:
@@ -24,7 +28,12 @@ class FakeRunner:
     def run_golden(self, instance: "p.Instance", run: int) -> str | None:
         if instance.id in self._missing_golden:
             return None
-        return f"/tmp/golden.{instance.id}.{run}.bin"
+        creation = f"D:{instance.id}" if self._vary_mask else "D:20260101000000Z"
+        obj = {"answer": 42, "metadata": {"CreationDate": creation}}
+        path = f"/tmp/golden.{instance.id}.{run}.json"
+        with open(path, "w") as f:
+            json.dump(obj, f)
+        return path
 
 
 def _match_block(_api: str, _golden: str, _cmp: "p.Comparator") -> dict[str, Any]:
@@ -311,6 +320,48 @@ def test_receipt_embeds_comparison_block_verbatim() -> None:
         _unpatch(orig)
     block = r["runs"][0]["results"][0]["comparison"]
     assert block["method"] == "pdf-text-jaccard" and block["overlap"] == 0.98
+
+
+# ---- regressions for the review fixes ----------------------------------------------------------------
+
+def test_mask_that_varies_with_input_is_uncovered() -> None:
+    # G3.5 regression: a NORMALIZED mask field that VARIES across the varied-input goldens is illegal to
+    # mask (it could be the load-bearing answer) -> mask_valid false -> not PROVEN.
+    orig = _patch(_match_block)
+    try:
+        r = p.prove("command.sh", _two_good_instances(),
+                    _frozen_cmp(field_mask=["/metadata/CreationDate"]), FakeRunner(vary_mask=True), runs_n=2,
+                    plan=_plan(repeats=True), build_instance_id="inv_build")
+    finally:
+        _unpatch(orig)
+    assert r["verdict"] != p.PROVEN, r["verdict"]
+    assert r["coverage"]["mask_fields_constant_across_runs"] is False
+
+
+def test_unknown_tenant_is_not_isolated() -> None:
+    # isolation regression: a (tenant=X, tenant=None) pair is NOT proven isolated (None could equal X).
+    inst = [
+        p.Instance(id="a", role="fresh", boundary="nominal", tenant="org_x"),
+        p.Instance(id="b", role="fresh", boundary="large-paginating", tenant=None),
+    ]
+    assert p._mutually_isolated(inst) is False
+
+
+def test_run_api_inherits_environment() -> None:
+    # env regression: run_api must inherit the real environment (PATH etc.), not replace it with PROVE_*.
+    import os
+    import tempfile
+    os.environ["PROVE_ENV_SENTINEL"] = "present"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            cmd = os.path.join(d, "command.sh")
+            # only writes output if the inherited sentinel is visible -> proves env was NOT wiped
+            with open(cmd, "w") as f:
+                f.write('#!/bin/bash\n[ -n "$PROVE_ENV_SENTINEL" ] && echo ok > "$PROVE_OUT"\n')
+            out = p.SubprocessRunner({}).run_api(cmd, p.Instance(id="i1", role="fresh", boundary="nominal"), 1)
+            assert out is not None, "run_api wiped the environment (PATH/sentinel lost)"
+    finally:
+        del os.environ["PROVE_ENV_SENTINEL"]
 
 
 if __name__ == "__main__":

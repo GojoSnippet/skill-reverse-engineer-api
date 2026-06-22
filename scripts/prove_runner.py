@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+# Reuse the comparator's own json helpers (do NOT reimplement — divergence is a bug class).
+from verify_equivalence import _strip_ptr, canonical, json_pointer, load_json
 
 SCHEMA = "verify_receipt/v1"
 PROVEN, FAILED, UNCOVERED = "PROVEN", "FAILED", "UNCOVERED"
@@ -70,11 +74,13 @@ class SubprocessRunner:
 
     def run_api(self, command: str, instance: Instance, run: int) -> str | None:
         out = f"/tmp/api_out.{instance.id}.{run}"
+        # Inherit the real environment (PATH/HOME/auth) and ADD the PROVE_* vars — replacing it would
+        # wipe PATH and make node/run-in-page/curl 'command not found' in the replay chain.
         proc = subprocess.run(
             ["bash", command],
             capture_output=True,
             text=True,
-            env={"PROVE_INSTANCE": instance.id, "PROVE_RUN": str(run), "PROVE_OUT": out},
+            env={**os.environ, "PROVE_INSTANCE": instance.id, "PROVE_RUN": str(run), "PROVE_OUT": out},
         )
         if proc.returncode != 0:
             return None
@@ -88,17 +94,38 @@ class SubprocessRunner:
 def _verify_equivalence(api: str, golden: str, comparator: Comparator) -> dict[str, Any]:
     # Invoke the FROZEN comparator (verify_equivalence.py); capture its §4.1 block verbatim.
     here = Path(__file__).resolve().parent
-    proc = subprocess.run(
-        [sys.executable, str(here / "verify_equivalence.py"),
-         "--api", api, "--golden", golden, "--threshold", str(comparator.threshold)],
-        capture_output=True,
-        text=True,
-    )
+    # Forward the FROZEN comparator — kind/field_mask/projection — or verify_equivalence falls back to the
+    # legacy byte/text path and a NORMALIZED/EXTRACTED proof would MISMATCH every run.
+    cmd = [sys.executable, str(here / "verify_equivalence.py"),
+           "--api", api, "--golden", golden, "--threshold", str(comparator.threshold),
+           "--comparator", comparator.kind]
+    for m in comparator.field_mask:
+        cmd += ["--mask", m]
+    if comparator.projection is not None:
+        cmd += ["--projection", comparator.projection]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     try:
         block: dict[str, Any] = json.loads(proc.stdout)
     except (ValueError, json.JSONDecodeError):
         return {"verdict": "INCONCLUSIVE", "method": "none", "reason": "comparator emitted no parsable block"}
     return block
+
+
+def _validate_mask(comparator: Comparator, goldens: list[str]) -> bool:
+    # G3.5 (FP-3): a NORMALIZED mask field that VARIES across the varied-input goldens could be the
+    # load-bearing answer — masking it would hide a real divergence. Valid only if every masked field is
+    # constant across all goldens. Non-NORMALIZED / no mask = nothing to validate.
+    if comparator.kind != "NORMALIZED" or not comparator.field_mask:
+        return True
+    seen: dict[str, set[str]] = {ptr: set() for ptr in comparator.field_mask}
+    for g in goldens:
+        try:
+            obj = load_json(g)
+        except (OSError, ValueError):
+            return False  # can't prove a JSON mask valid against a non-JSON golden
+        for ptr in comparator.field_mask:
+            seen[ptr].add(canonical(json_pointer(obj, _strip_ptr(ptr))))
+    return all(len(vals) <= 1 for vals in seen.values())
 
 
 def mask_required_but_missing(comparator: Comparator) -> bool:
@@ -159,12 +186,11 @@ def _mutually_isolated(instances: list[Instance]) -> bool:
         for b in instances:
             if a.id == b.id:
                 continue
-            # Different tenant OR an explicit isolated-from declaration in either direction.
-            same_tenant = a.tenant is not None and a.tenant == b.tenant
+            # A pair is PROVEN isolated only by an explicit isolated-from declaration, or by two DISTINCT
+            # non-None tenants. A None (unknown) tenant is never assumed isolated — it could equal the other.
             declared = b.id in a.isolated_from or a.id in b.isolated_from
-            if same_tenant and not declared:
-                return False
-            if not same_tenant and not declared and a.tenant is None and b.tenant is None:
+            distinct_tenants = a.tenant is not None and b.tenant is not None and a.tenant != b.tenant
+            if not (declared or distinct_tenants):
                 return False
     return True
 
@@ -200,7 +226,7 @@ def prove(
     plan: dict[str, Any] | None = None,
     build_instance_id: str | None = None,
     segment_id: str = "s0",
-    mask_constant: bool = True,
+    mask_constant: bool | None = None,
 ) -> dict[str, Any]:
     plan = plan or {}
     computed_carriers = has_computed(plan)
@@ -209,12 +235,15 @@ def prove(
     run_blocks: list[dict[str, Any]] = []
     all_match = True
     first_divergence: str | None = None
+    goldens_used: list[str] = []
 
     for inst in instances:
         results: list[dict[str, Any]] = []
         for run in range(1, runs_n + 1):
             api = runner.run_api(command, inst, run)
             golden = runner.run_golden(inst, run)
+            if golden is not None:
+                goldens_used.append(golden)
             if api is None or golden is None:
                 all_match = False
                 missing = "api command produced no output" if api is None else "no UI golden for this run"
@@ -246,6 +275,9 @@ def prove(
             }
         run_blocks.append(block_entry)
 
+    # G3.5: validate the mask against the actual goldens unless the caller fixed it (tests).
+    if mask_constant is None:
+        mask_constant = _validate_mask(comparator, goldens_used)
     coverage = _coverage(instances, runs_n, build_instance_id, computed_carriers, repeat_present, mask_constant)
     cov_ok, cov_reason = _coverage_ok(coverage, comparator)
 
@@ -261,8 +293,10 @@ def prove(
             "threshold": comparator.threshold,
             "mask_valid": mask_constant,
         },
-        "api_instance": f"run-in-page chain ({command})",
-        "golden_instance": "UI export on each held-out instance",
+        # The held-out instances the proof actually ran on, and the build instance held out (real ids, so
+        # the receipt is auditable). The teach gate checks coverage.fresh_not_build_instance, not these.
+        "proof_instances": [i.id for i in instances if i.role == "fresh"],
+        "build_instance": build_instance_id,
         "runs": run_blocks,
         "coverage": coverage,
     }

@@ -21,6 +21,9 @@
 # Output: plan.json (CONTRACTS §3) + a human report on stderr.
 
 import argparse
+import base64
+import binascii
+import hashlib
 import json
 import math
 import os
@@ -221,28 +224,81 @@ def is_mutation(row: JsonObj) -> bool:
 # ---- S2 SUBSET: golden source + transitive request-dependency closure ------------------------------
 
 
+# A binary artifact is identified by its leading MAGIC bytes — its IDENTITY, independent of the envelope it
+# is delivered in (raw body, base64-in-JSON, …). New container types add one row; new ENVELOPES add a
+# recovery strategy in _artifact_extractor (see the extension note there).
+_MAGIC_FOR_TAG: dict[str, bytes] = {
+    "pdf": b"%PDF-", "zip": b"PK\x03\x04", "xlsx": b"PK\x03\x04", "docx": b"PK\x03\x04", "pptx": b"PK\x03\x04",
+    "png": b"\x89PNG", "jpg": b"\xff\xd8\xff", "jpeg": b"\xff\xd8\xff", "gif": b"GIF8", "gz": b"\x1f\x8b",
+}
+_B64ISH = re.compile(r"[A-Za-z0-9+/_=-]+\Z")
+
+
 def find_golden_source(run: Run) -> JsonObj:
-    # Locate the response(s) whose body is/contains/assembles-into the golden. We match on the golden's
-    # sha256/bytes/produces_ref when present, else on a tagged binary content-type. found:false => BAIL-1.
+    # Locate the response that CARRIES the golden artifact and HOW (the extractor recipe). We match the
+    # artifact's IDENTITY (type-magic / sha256), not just a content-type envelope — so a binary delivered
+    # base64-in-JSON is found, not wrongly declared client-rendered. found:false => BAIL-1.
     golden = run.golden
     tag = golden.get("tag")
-    matches: list[int] = []
+    magic = _MAGIC_FOR_TAG.get(tag) if isinstance(tag, str) else None
+    raw_sha = golden.get("sha256")
+    gsha = raw_sha if isinstance(raw_sha, str) and len(raw_sha) >= 16 else None
+    hits: list[tuple[int, str]] = []  # (exchange seq, extractor recipe)
     for i, row in enumerate(run.rows):
-        ctype = (row.get("respHeaders") or {}).get("content-type", "") or row.get("contentType", "") or ""
-        ct = ctype.lower()
-        if tag and (tag in ct or _ctype_matches_tag(ct, tag)):
-            matches.append(i)
-    if not matches:
+        ext = _artifact_extractor(row, tag, magic, gsha)
+        if ext is not None:
+            hits.append((i, ext))
+    if not hits:
         return {"found": False, "mode": "single", "exchange_seqs": [], "extractor": None, "comparator_hint": None}
-    seqs = _resolve_golden_seqs(run, golden, matches)
+    seqs = _resolve_golden_seqs(run, golden, [i for i, _ in hits])
+    extractor = next((e for i, e in reversed(hits) if i in seqs), "whole-payload")  # the chosen (terminal) source's recipe
     mode = "assembled" if len(seqs) > 1 else "single"
     return {
         "found": True,
         "mode": mode,
         "exchange_seqs": seqs,
-        "extractor": "whole-payload",
+        "extractor": extractor,
         "comparator_hint": "assembled" if mode == "assembled" else "binary-projection",
     }
+
+
+def _artifact_extractor(row: JsonObj, tag: object, magic: bytes | None, gsha: str | None) -> str | None:
+    # Does this response carry the golden artifact, and by what recovery recipe? Strategies, in order:
+    #   1) RAW    — the body's own content-type IS the artifact's type (typed download / pre-signed-URL GET).
+    #   2) BASE64 — a binary artifact base64-encoded inside a structured (JSON) body; matched by decoded magic.
+    # EXTENSION POINTS (add a strategy here, never a per-app branch): URL-behind-JSON (a field holding a link
+    # whose later GET carries the bytes) and gzip/deflate-wrapped bodies.
+    ctype = ((row.get("respHeaders") or {}).get("content-type", "") or row.get("contentType", "") or "").lower()
+    if isinstance(tag, str) and tag and (tag in ctype or _ctype_matches_tag(ctype, tag)):
+        return "whole-payload"
+    if magic is not None:
+        body = row.get("respBody")
+        if isinstance(body, (dict, list)):
+            leaves: list[tuple[str, object]] = []
+            _flatten(body, "", leaves)
+            for ptr, val in leaves:
+                dec = _b64_artifact(val) if isinstance(val, str) else None
+                if dec is not None and (dec.startswith(magic) or (gsha is not None and _sha16(dec) == gsha)):
+                    return f"json-ptr:{ptr}|base64"
+    return None
+
+
+def _b64_artifact(val: str) -> bytes | None:
+    # Decode a string IFF it plausibly carries a base64 artifact (long, base64 charset). The magic check at the
+    # call site is the real filter; this just recovers candidate bytes (standard or URL-safe alphabet).
+    s = "".join(val.split())
+    if len(s) < 64 or not _B64ISH.match(s):
+        return None
+    padded = s + "=" * (-len(s) % 4)
+    decoder = base64.urlsafe_b64decode if ("-" in s or "_" in s) else base64.b64decode
+    try:
+        return decoder(padded)
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _sha16(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()[:16]
 
 
 def _resolve_golden_seqs(run: Run, golden: JsonObj, matches: list[int]) -> list[int]:

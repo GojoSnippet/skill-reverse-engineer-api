@@ -443,6 +443,64 @@ def test_golden_source_single_not_assembled_for_common_ctype():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_golden_source_finds_base64_pdf_in_json():
+    # the live-shakedown false negative: a binary artifact delivered base64 INSIDE application/json must be
+    # found by its decoded magic (not declared client-rendered), with the decode recipe in the extractor.
+    import base64 as b64
+    pdf_b64 = b64.b64encode(b"%PDF-1.7\n" + b"x" * 200).decode()
+    root = tempfile.mkdtemp()
+    try:
+        rows = [
+            _row("a", "POST", "/apply", resp={"data": {"applyTemplate": {"jobId": "job_7f3ad9e21b4c"}}}),
+            _row("z", "POST", "/export", resp={"data": {"exportArtifact": {"file": pdf_b64, "filename": "x.pdf"}}}),
+        ]
+        rd = _write_run(root, "run", rows, _inputs("run", [], golden_tag="pdf"))
+        gs = c.find_golden_source(c.Run(rd))
+        assert gs["found"] is True, gs
+        assert gs["exchange_seqs"] == [1], gs["exchange_seqs"]
+        assert gs["extractor"] == "json-ptr:/data/exportArtifact/file|base64", gs["extractor"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_golden_source_finds_raw_typed_artifact():
+    # the raw-typed-download envelope still works (regression): content-type IS the artifact's type.
+    root = tempfile.mkdtemp()
+    try:
+        rows = [_row("z", "POST", "/export", resp={"ok": True}, rctype="application/pdf")]
+        rd = _write_run(root, "run", rows, _inputs("run", [], golden_tag="pdf"))
+        gs = c.find_golden_source(c.Run(rd))
+        assert gs["found"] and gs["extractor"] == "whole-payload" and gs["exchange_seqs"] == [0], gs
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_golden_source_base64_generalizes_across_types():
+    # not pdf-specific: a base64 ZIP inside JSON is found by its own magic.
+    import base64 as b64
+    zip_b64 = b64.b64encode(b"PK\x03\x04" + b"y" * 200).decode()
+    root = tempfile.mkdtemp()
+    try:
+        rows = [_row("z", "POST", "/export", resp={"result": {"archive": zip_b64}})]
+        rd = _write_run(root, "run", rows, _inputs("run", [], golden_tag="zip"))
+        gs = c.find_golden_source(c.Run(rd))
+        assert gs["found"] and gs["extractor"] == "json-ptr:/result/archive|base64", gs
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_golden_source_bail1_when_truly_client_rendered():
+    # no response carries the artifact (raw OR base64) -> genuinely client-rendered -> BAIL-1 (correct keep-UI).
+    root = tempfile.mkdtemp()
+    try:
+        rows = [_row("a", "GET", "/data", resp={"rows": [1, 2, 3], "note": "drawn in the browser"})]
+        rd = _write_run(root, "run", rows, _inputs("run", [], golden_tag="pdf"))
+        gs = c.find_golden_source(c.Run(rd))
+        assert gs["found"] is False, gs
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_repeat_inserted_for_pagination_signal():
     def runset(label: str, inv: str) -> tuple[list[dict], dict]:
         rows = [

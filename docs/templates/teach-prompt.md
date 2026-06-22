@@ -21,7 +21,7 @@ API-backed step.
 - Read reverse-engineer-api's SKILL.md and follow its Procedure exactly, including its HARD RULES.
 - I'm already logged in.
 
-- Work the operator checklist in docs/operator-playbook.md, box by box, in order. Paste each box's command
+- Work the CHECKLIST in reverse-engineer-api's SKILL.md, box by box, in order. Paste each box's command
   output before ticking it. The gates decide the verdict — do not judge any value yourself.
 
 - CAPTURE THE WHOLE SEGMENT FROM A CLEAN STATE, with >=2 varied inputs (box 1). Start from a clean instance
@@ -63,7 +63,7 @@ Use the reverse-engineer-api skill in teaching mode to convert the alphaskill-me
 "open_and_download_summary" step into an API-backed step.
 - Target (editable): the alphaskill-metaview skill, step "open_and_download_summary".
 - Read reverse-engineer-api's SKILL.md and follow its Procedure exactly.
-- Work docs/operator-playbook.md box by box; paste each command's output before ticking.
+- Work the SKILL.md checklist box by box; paste each command's output before ticking.
 - CAPTURE THE WHOLE SEGMENT FROM A CLEAN NOTE, >=2 varied notes. Pick notes that do NOT have the template
   applied yet. Do nothing before capture --start. Then per note: capture --start -> open the note, apply the
   template, wait for "Saved", download -> capture --stop. The apply-template mutation MUST be inside the

@@ -10,8 +10,9 @@ A later run does the step via API: faster, cheaper, no clicking.
 ---
 
 ## 0. Is this step worth API-ifying? (10-second filter)
-- ✅ **Yes:** the step does **one clear data action** backed by the app's own API — a download/export, a
-  fetch/read, or a render/generate. **Reads** and **consequence-free writes** (e.g. "generate a PDF") are ideal.
+- ✅ **Yes:** the step has **one clear data goal** backed by the app's own API — a download/export, a
+  fetch/read, or a render/generate — reachable as **one call or a short self-contained chain** (set up →
+  act). **Reads** and **consequence-free writes** (e.g. "generate a PDF") are ideal.
 - ❌ **No — leave it as UI:** destructive/irreversible writes (send, pay, delete) with no safe way to test;
   pages behind CAPTCHA / anti-bot / signed requests; steps that are mostly human judgement.
   (Teaching mode will *also* refuse these and keep the UI — but don't waste a session starting.)
@@ -28,18 +29,24 @@ A later run does the step via API: faster, cheaper, no clicking.
 ## 2. Teach it (one session)
 1. Mount `reverse-engineer-api` (ro) + the client repo (editable). **Fresh session.**
 2. **Warm up** — log into the app first, using the login prompt in
-   [`templates/teach-prompt.md`](templates/teach-prompt.md). *(Why: the API needs a live logged-in session,
-   and it keeps the capture clean.)*
-3. **Teach** — paste the teach prompt from the same template, filling in `<skill>`, `<step>`, the prep, and
-   the **one action** to capture.
-4. Let it run. It ends with a `TAUGHT` report: **`api-added`** or **`kept-ui`** (both are valid — see §6).
+   [`templates/teach-prompt.md`](templates/teach-prompt.md).
+3. **Teach** — paste the teach prompt from the same template. Two things the prompt makes it do — sanity-check
+   it actually did them:
+   - **Captures the WHOLE action from a clean state** — nothing set up before `capture --start`. If the step
+     applies a template / sets something up *then* downloads, all of it is inside the capture. (Carving setup
+     into "prep" is exactly what produced a step that exported junk — don't.)
+   - **Proves equivalence on a fresh instance** — it rebuilds the action as one API chain and ships it only if
+     the API's output **matches the UI's output** on a *different* instance it didn't set up.
+4. Let it run. It ends with a `TAUGHT` report: **`api-added`** (output matched the UI) or **`kept-ui`**
+   (couldn't reproduce it) — both are valid, see §6.
 
 ## 3. Review the diff (1 minute)
 `git -C <client-repo> diff` and confirm:
 - exactly **one** step file changed;
 - a `## API attempt` block was inserted **above** the original instructions (now `## UI instructions`);
 - the `## UI instructions` are **byte-identical** to the old steps — your proven path is untouched;
-- the header says `validated: yes (<evidence>)`.
+- the header says `validated: yes (equivalent to UI on a fresh instance …)` and the report has an
+  **`EQUIVALENCE: MATCH`** line — *not* just "a file was produced."
 
 If anything else changed, or the UI was reworded → stop and re-teach. (The tooling prevents this, so it
 shouldn't happen — but always glance.)
@@ -54,7 +61,10 @@ then merge to `main`.
 1. **Fresh session**, the client repo mounted on your **branch** (read-only is fine — not teaching now).
 2. **Warm up** — log into the app.
 3. Give the **plain task** — the normal request, *no mention of API* (e.g. "download invoice 12345").
+   Prefer a **fresh entity** you didn't teach on, so you're testing generalization.
 4. It should run the API and report `method: api` — **no UI clicking**.
+5. **Open the produced file and check its contents** — not just that a file appeared. (A file existing is
+   not proof; the teach's equivalence gate is, but spot-check anyway.)
 
 **Verify from the events:**
 ```bash
@@ -66,8 +76,11 @@ curl "http://localhost:8004/events?agent_id=<session-id>&order=asc&size=1000"
 ## 6. Expectations (read this — manage your own)
 - **`api-added`** → success. The step now runs via API, with the UI as automatic fallback.
 - **`kept-ui`** → **NOT a failure.** Some steps genuinely can't be replayed (the app's auth isn't
-  reproducible, or it's signed/anti-bot). The taught report tells you *why*. The step keeps working via the
-  UI exactly as before — **you've lost nothing**, you just didn't gain the speedup for that one step.
+  reproducible, it's signed/anti-bot, **or the API output didn't match the UI's** — the equivalence gate
+  caught a chain that doesn't faithfully reproduce the UI). The taught report tells you *why*. The step keeps
+  working via the UI exactly as before — **you've lost nothing**, you just didn't gain the speedup.
+- **`validated: yes` now means "proven equal to the UI on a fresh instance," not "a file exists."** That
+  stronger bar is the point — it's what stops a fast-but-wrong step from shipping.
 - **Teaching takes a few minutes; reuse is seconds.** The teach is a one-time cost per step.
 - It edits **only the one step file** and never touches the UI text — by design.
 
@@ -77,10 +90,14 @@ curl "http://localhost:8004/events?agent_id=<session-id>&order=asc&size=1000"
 | Session **errors immediately**; logs show `resolve_skill_mounts` failing | Branch name has a `/`. Use a **slash-free** branch (`api-download`, not `feat/api-download`). |
 | **Reuse runs the UI**, not the API | You mounted the wrong branch (the one without `## API attempt`), or didn't log in first. Open the step in the Skills panel — it must show `## API attempt` at the top. |
 | Event query returns **422 / empty** | `size` must be **≤ 1000**. |
-| Teach feels **slow** | Normal — capture + analyze + validate. Only worry if it's >15 min with no `TAUGHT` report; then stop and retry. |
+| Teach feels **slow** | Expected — it captures the whole action **and** proves equivalence on a fresh instance (a UI run + an API run + a diff). Reliability costs time; reuse is still seconds. Only worry if there's no `TAUGHT` report after a long while with no progress. |
 
-## Worked examples (both proven end-to-end)
-- **Wave** — `download-invoice`: a GraphQL mutation authed by the `waveapps` cookie used as a bearer →
-  PDF. Taught + reused via API in **22 s**.
-- **Metaview** (`clicks-ai/alphaskill`, `open_and_download_summary`): a 2-call chain
-  `BootstrapSynthesis → ExportAiNotesMutation` → base64 PDF. Taught + reused via API in **~37 s**.
+## Worked examples
+- **Wave** — `download-invoice`: a GraphQL mutation authed by the `waveapps` cookie used as a bearer → PDF.
+  A single self-contained call; taught + reused via API in seconds.
+- **Metaview** (`clicks-ai/alphaskill`, `open_and_download_summary`) — **the cautionary tale that created
+  the equivalence gate.** An early teach captured only the *download* and skipped *applying the One Pager
+  template* (that was done in prep, outside the capture). The API "succeeded" — it produced a 45 KB PDF — but
+  it was the **wrong artifact**: the real One Pager is 107 KB / 3 pages. Nobody opened the file, so a
+  transport-only "it worked" hid it. The fix is this whole playbook: capture the **whole** chain (apply +
+  export) and **prove the output equals the UI's** on a fresh note before shipping.

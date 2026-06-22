@@ -18,10 +18,15 @@ teaching-prompt templates. Everything below is the technical/agent-facing detail
   stages only (`load..infer`), **never `emit`** — no openapi/client/report/html files.
 - `scripts/analyze.py` — surfaces candidate endpoints (teaching-time).
 - `scripts/detect_replayable.py` — signed/nonce/CAPTCHA/anti-bot bail-to-UI classifier (teaching-time).
+- `scripts/probe_auth.py` — deterministic bounded auth search (cookie session / readable-token-as-bearer).
 - `scripts/run_in_page.py` — source for **`run-in-page`** (contract 1), the generic **on-PATH** runtime
   helper: body-derived read/write gate (refuses a write without `--allow-mutation`), success-predicate →
   exit code, correct-tab targeting, binary-to-file. The runtime installs it on PATH; steps call it **by name**.
-- `scripts/lint_skill.py` — the **CI gate** that enforces the pattern in every client skill repo.
+- `scripts/verify_equivalence.py` — **the teach-time gate**: compares the API artifact to the UI golden at the
+  content level (MATCH / MISMATCH / INCONCLUSIVE). A step ships as API *only* on a MATCH on a fresh instance —
+  "a file was produced" is not success.
+- `scripts/teach_insert.py` — the mechanical single-file surgical insert (the write path).
+- `scripts/lint_skill.py` — optional CI consistency check (not part of the teaching procedure).
 - `references/hard-cases.md` — read/write, auth ladder, chains, and when to bail.
 - `e2e/run_e2e.sh` — offline-ish smoke test of the pipeline.
 
